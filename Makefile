@@ -20,6 +20,4 @@ status:
 	sudo systemctl status nanoclaw
 
 install:
-	sed -e 's|__USER__|$(shell id -un)|g' -e 's|__WORKDIR__|$(CURDIR)|g' systemd/nanoclaw.service | sudo tee /etc/systemd/system/nanoclaw.service > /dev/null
-	sudo systemctl daemon-reload
-	sudo systemctl enable --now nanoclaw
+	pnpm exec tsx setup/index.ts --step service
