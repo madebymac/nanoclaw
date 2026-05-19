@@ -1,0 +1,16 @@
+[Unit]
+Description=NanoClaw
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=matty
+WorkingDirectory=/home/matty/nanoclaw-v2
+ExecStart=/usr/bin/node dist/index.js
+ExecStop=/bin/sh -c 'docker ps -q --filter label=nanoclaw-install | xargs -r docker stop'
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
