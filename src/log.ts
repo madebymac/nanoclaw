@@ -57,6 +57,39 @@ export const log = {
   fatal: (msg: string, data?: Record<string, unknown>) => emit('fatal', msg, data),
 };
 
+// Third-party deps (e.g. @chat-adapter/telegram) write directly to
+// console.{log,warn,error}, bypassing our logger and producing un-timestamped
+// lines. Wrap the console methods so every line lands with the same prefix.
+{
+  const format = (args: unknown[]) =>
+    args
+      .map((a) => {
+        if (typeof a === 'string') return a;
+        try {
+          return JSON.stringify(a);
+        } catch {
+          return String(a);
+        }
+      })
+      .join(' ');
+
+  const write = (level: Level, args: unknown[]) => {
+    if (LEVELS[level] < threshold) return;
+    const tag = `${COLORS[level]}${level.toUpperCase()}${RESET}`;
+    const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
+    const prefix = `[${ts()}] ${tag} `;
+    const body = format(args).replace(/\n/g, '\n' + prefix);
+    stream.write(prefix + body + '\n');
+  };
+
+  const c = console as Console & Record<string, unknown>;
+  c.log = (...args: unknown[]) => write('info', args);
+  c.info = (...args: unknown[]) => write('info', args);
+  c.warn = (...args: unknown[]) => write('warn', args);
+  c.error = (...args: unknown[]) => write('error', args);
+  c.debug = (...args: unknown[]) => write('debug', args);
+}
+
 process.on('uncaughtException', (err) => {
   log.fatal('Uncaught exception', { err });
   process.exit(1);
