@@ -14,6 +14,9 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import { createStreamExtractor, type ExtractedBlock } from './stream-dispatch.js';
+
+const STREAM_REPLIES = process.env.NANOCLAW_STREAM_REPLIES === '1';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -278,6 +281,12 @@ async function processQuery(
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
   let endedForCommand = false;
+
+  // Early-dispatch state: when streaming is enabled, dispatch <message>
+  // blocks as soon as they close, and skip the same prefix when the
+  // final `result` event arrives. Reset on each `init` (e.g. PreCompact).
+  const streamExtractor = STREAM_REPLIES ? createStreamExtractor() : null;
+  let earlyDispatched = 0;
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -360,7 +369,13 @@ async function processQuery(
       handleEvent(event, routing);
       touchHeartbeat();
 
-      if (event.type === 'init') {
+      if (event.type === 'partial' && streamExtractor) {
+        const newlyClosed = streamExtractor.extractNewlyClosed(event.text);
+        if (newlyClosed.length > 0) {
+          for (const block of newlyClosed) dispatchBlock(block, routing);
+          earlyDispatched += newlyClosed.length;
+        }
+      } else if (event.type === 'init') {
         queryContinuation = event.continuation;
         // Persist immediately so a mid-turn container crash still lets the
         // next wake resume the conversation. Without this, the session id
@@ -378,7 +393,7 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { hasUnwrapped } = dispatchResultText(event.text, routing);
+          const { hasUnwrapped } = dispatchResultText(event.text, routing, earlyDispatched);
           if (hasUnwrapped && !unwrappedNudged) {
             unwrappedNudged = true;
             const destinations = getAllDestinations();
@@ -428,11 +443,16 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
-function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
+function dispatchResultText(
+  text: string,
+  routing: RoutingContext,
+  skipFirstBlocks = 0,
+): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
   let sent = 0;
+  let blockIdx = 0;
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
 
@@ -443,6 +463,13 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
     const toName = match[1];
     const body = match[2].trim();
     lastIndex = MESSAGE_RE.lastIndex;
+    const currentIdx = blockIdx++;
+
+    // Already sent in the streaming early-dispatch path.
+    if (currentIdx < skipFirstBlocks) {
+      sent++;
+      continue;
+    }
 
     const dest = findByName(toName);
     if (!dest) {
@@ -468,6 +495,22 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
   return { sent, hasUnwrapped };
+}
+
+/**
+ * Dispatch a single extracted block from the streaming path. Mirrors the
+ * unknown-destination handling of dispatchResultText but skips the
+ * scratchpad accounting — partial scratchpad is logged on the `result`
+ * pass when we see the full text.
+ */
+function dispatchBlock(block: ExtractedBlock, routing: RoutingContext): void {
+  const dest = findByName(block.to);
+  if (!dest) {
+    log(`Stream: unknown destination "${block.to}", deferring to result-event path`);
+    return;
+  }
+  sendToDestination(dest, block.body, routing);
+  log(`Stream-dispatched <message to="${block.to}"> (${block.body.length} chars)`);
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {

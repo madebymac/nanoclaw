@@ -85,6 +85,14 @@ export type ProviderEvent =
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**
+   * Incremental assistant text as the model produces it. `text` is the
+   * full accumulated assistant text so far for the current turn (not a
+   * delta), so consumers don't have to reassemble. Providers that don't
+   * stream may omit this entirely — the `result` event still carries the
+   * final text and is authoritative.
+   */
+  | { type: 'partial'; text: string }
+  /**
    * Liveness signal. Providers MUST yield this on every underlying SDK
    * event (tool call, thinking, partial message, anything) so the
    * poll-loop's idle timer stays honest during long tool runs.
