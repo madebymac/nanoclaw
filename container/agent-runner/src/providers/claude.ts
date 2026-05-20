@@ -317,6 +317,12 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      // Accumulator for assistant text across the current turn. The SDK
+      // emits one `assistant` message per content block (and sometimes
+      // intermediate updates); we concatenate all `text` parts so the
+      // poll-loop sees a monotonically growing string and can early-dispatch
+      // complete <message to="..."> blocks as they close.
+      let assistantText = '';
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
@@ -325,9 +331,24 @@ export class ClaudeProvider implements AgentProvider {
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {
+          assistantText = '';
           yield { type: 'init', continuation: message.session_id };
+        } else if (message.type === 'assistant') {
+          const am = message as { message?: { content?: Array<{ type?: string; text?: string }> } };
+          const blocks = am.message?.content;
+          if (Array.isArray(blocks)) {
+            let appended = '';
+            for (const b of blocks) {
+              if (b?.type === 'text' && typeof b.text === 'string') appended += b.text;
+            }
+            if (appended) {
+              assistantText += appended;
+              yield { type: 'partial', text: assistantText };
+            }
+          }
         } else if (message.type === 'result') {
           const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
+          assistantText = '';
           yield { type: 'result', text };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
