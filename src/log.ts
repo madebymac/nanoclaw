@@ -1,3 +1,5 @@
+import { format as utilFormat } from 'node:util';
+
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } as const;
 type Level = keyof typeof LEVELS;
 
@@ -31,12 +33,7 @@ function formatData(data: Record<string, unknown>): string {
 }
 
 function ts(): string {
-  const d = new Date();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  const ss = String(d.getSeconds()).padStart(2, '0');
-  const ms = String(d.getMilliseconds()).padStart(3, '0');
-  return `${hh}:${mm}:${ss}.${ms}`;
+  return new Date().toISOString();
 }
 
 function emit(level: Level, msg: string, data?: Record<string, unknown>): void {
@@ -53,6 +50,34 @@ export const log = {
   error: (msg: string, data?: Record<string, unknown>) => emit('error', msg, data),
   fatal: (msg: string, data?: Record<string, unknown>) => emit('fatal', msg, data),
 };
+
+// Third-party deps (e.g. @chat-adapter/telegram) write directly to
+// console.{log,warn,error}, bypassing our logger and producing un-timestamped
+// lines. installConsoleCapture() routes them through emit() so every line
+// lands with the same prefix. Opt-in — call once from the entry point so
+// importing { log } from tests does not silently rewrite console.
+export function installConsoleCapture(): void {
+  const formatArg = (a: unknown): unknown => (a instanceof Error ? formatErr(a) : a);
+
+  const write = (level: Level, args: unknown[]) => {
+    if (LEVELS[level] < threshold) return;
+    const tag = `${COLORS[level]}${level.toUpperCase()}${level === 'fatal' ? FULL_RESET : RESET}`;
+    const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
+    const prefix = `[${ts()}] ${tag} `;
+    const body = utilFormat(...args.map(formatArg)).replace(/\n/g, '\n' + prefix);
+    stream.write(prefix + body + '\n');
+  };
+
+  // console.log → debug: chatty deps tend to use log() for verbose output;
+  // routing it to info would spam nanoclaw.log. Explicit console.info still
+  // lands at info.
+  const c = console as Console & Record<string, unknown>;
+  c.log = (...args: unknown[]) => write('debug', args);
+  c.info = (...args: unknown[]) => write('info', args);
+  c.warn = (...args: unknown[]) => write('warn', args);
+  c.error = (...args: unknown[]) => write('error', args);
+  c.debug = (...args: unknown[]) => write('debug', args);
+}
 
 process.on('uncaughtException', (err) => {
   log.fatal('Uncaught exception', { err });
