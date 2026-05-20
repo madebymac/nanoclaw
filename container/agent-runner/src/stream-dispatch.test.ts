@@ -13,7 +13,7 @@ describe('createStreamExtractor', () => {
     const ex = createStreamExtractor();
     expect(ex.extractNewlyClosed('<message to="user">hello')).toEqual([]);
     const out = ex.extractNewlyClosed('<message to="user">hello</message>');
-    expect(out).toEqual([{ to: 'user', body: 'hello' }]);
+    expect(out).toEqual([{ index: 0, to: 'user', body: 'hello' }]);
     expect(ex.count()).toBe(1);
   });
 
@@ -22,27 +22,27 @@ describe('createStreamExtractor', () => {
     expect(
       ex.extractNewlyClosed('<message to="user">first</message><message to="user">second</message>'),
     ).toEqual([
-      { to: 'user', body: 'first' },
-      { to: 'user', body: 'second' },
+      { index: 0, to: 'user', body: 'first' },
+      { index: 1, to: 'user', body: 'second' },
     ]);
     expect(ex.extractNewlyClosed('<message to="user">first</message><message to="user">second</message>')).toEqual([]);
     const out = ex.extractNewlyClosed(
       '<message to="user">first</message><message to="user">second</message><message to="user">third</message>',
     );
-    expect(out).toEqual([{ to: 'user', body: 'third' }]);
+    expect(out).toEqual([{ index: 2, to: 'user', body: 'third' }]);
   });
 
   test('ignores partial trailing block but still returns earlier closed ones', () => {
     const ex = createStreamExtractor();
     const out = ex.extractNewlyClosed('<message to="a">done</message><message to="b">in prog');
-    expect(out).toEqual([{ to: 'a', body: 'done' }]);
+    expect(out).toEqual([{ index: 0, to: 'a', body: 'done' }]);
     expect(ex.count()).toBe(1);
   });
 
   test('trims block body whitespace', () => {
     const ex = createStreamExtractor();
     const out = ex.extractNewlyClosed('<message to="user">\n  hello  \n</message>');
-    expect(out).toEqual([{ to: 'user', body: 'hello' }]);
+    expect(out).toEqual([{ index: 0, to: 'user', body: 'hello' }]);
   });
 
   test('handles multiple destinations', () => {
@@ -51,8 +51,8 @@ describe('createStreamExtractor', () => {
       'noise <message to="alice">hi</message> noise <message to="bob">there</message>',
     );
     expect(out).toEqual([
-      { to: 'alice', body: 'hi' },
-      { to: 'bob', body: 'there' },
+      { index: 0, to: 'alice', body: 'hi' },
+      { index: 1, to: 'bob', body: 'there' },
     ]);
   });
 });

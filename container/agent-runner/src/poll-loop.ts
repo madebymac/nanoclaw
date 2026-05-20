@@ -283,10 +283,14 @@ async function processQuery(
   let endedForCommand = false;
 
   // Early-dispatch state: when streaming is enabled, dispatch <message>
-  // blocks as soon as they close, and skip the same prefix when the
-  // final `result` event arrives. Reset on each `init` (e.g. PreCompact).
-  const streamExtractor = STREAM_REPLIES ? createStreamExtractor() : null;
-  let earlyDispatched = 0;
+  // blocks as soon as they close, and tell the final `result` pass which
+  // block indices it should skip (vs. re-send / scratchpad-log). We track
+  // by index rather than count so that an unknown-destination block at
+  // position N — which the stream path can't send — still hits the
+  // result-pass scratchpad and unwrapped-output nudge logic.
+  // Reset on each `init` (e.g. PreCompact starts a fresh turn).
+  let streamExtractor = STREAM_REPLIES ? createStreamExtractor() : null;
+  let earlyDispatched: Set<number> = new Set();
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -371,12 +375,17 @@ async function processQuery(
 
       if (event.type === 'partial' && streamExtractor) {
         const newlyClosed = streamExtractor.extractNewlyClosed(event.text);
-        if (newlyClosed.length > 0) {
-          for (const block of newlyClosed) dispatchBlock(block, routing);
-          earlyDispatched += newlyClosed.length;
+        for (const block of newlyClosed) {
+          if (dispatchBlock(block, routing)) earlyDispatched.add(block.index);
         }
       } else if (event.type === 'init') {
         queryContinuation = event.continuation;
+        // Fresh turn — drop any streaming state from a prior segment
+        // (e.g. PreCompact emits a new init mid-stream).
+        if (STREAM_REPLIES) {
+          streamExtractor = createStreamExtractor();
+          earlyDispatched = new Set();
+        }
         // Persist immediately so a mid-turn container crash still lets the
         // next wake resume the conversation. Without this, the session id
         // was only written after the full stream completed — if the
@@ -394,6 +403,11 @@ async function processQuery(
         markCompleted(initialBatchIds);
         if (event.text) {
           const { hasUnwrapped } = dispatchResultText(event.text, routing, earlyDispatched);
+          // earlyDispatched is consumed; reset for any subsequent turn that
+          // reuses this processQuery invocation (currently none, but the
+          // explicit reset keeps state contained to the turn that produced it).
+          earlyDispatched = new Set();
+          if (streamExtractor) streamExtractor = createStreamExtractor();
           if (hasUnwrapped && !unwrappedNudged) {
             unwrappedNudged = true;
             const destinations = getAllDestinations();
@@ -446,7 +460,7 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
 function dispatchResultText(
   text: string,
   routing: RoutingContext,
-  skipFirstBlocks = 0,
+  alreadyDispatched: ReadonlySet<number> = new Set(),
 ): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
@@ -466,7 +480,7 @@ function dispatchResultText(
     const currentIdx = blockIdx++;
 
     // Already sent in the streaming early-dispatch path.
-    if (currentIdx < skipFirstBlocks) {
+    if (alreadyDispatched.has(currentIdx)) {
       sent++;
       continue;
     }
@@ -498,19 +512,20 @@ function dispatchResultText(
 }
 
 /**
- * Dispatch a single extracted block from the streaming path. Mirrors the
- * unknown-destination handling of dispatchResultText but skips the
- * scratchpad accounting — partial scratchpad is logged on the `result`
- * pass when we see the full text.
+ * Dispatch a single extracted block from the streaming path. Returns true
+ * iff the block was actually sent. Unknown destinations are deferred so
+ * the result-event pass can scratchpad-log them and (if no blocks at all
+ * were resolved) emit the unwrapped-output nudge.
  */
-function dispatchBlock(block: ExtractedBlock, routing: RoutingContext): void {
+function dispatchBlock(block: ExtractedBlock, routing: RoutingContext): boolean {
   const dest = findByName(block.to);
   if (!dest) {
     log(`Stream: unknown destination "${block.to}", deferring to result-event path`);
-    return;
+    return false;
   }
   sendToDestination(dest, block.body, routing);
   log(`Stream-dispatched <message to="${block.to}"> (${block.body.length} chars)`);
+  return true;
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {

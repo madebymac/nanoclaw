@@ -16,6 +16,8 @@
  */
 
 export interface ExtractedBlock {
+  /** Index of this block within the accumulated text, starting at 0. */
+  index: number;
   to: string;
   body: string;
 }
@@ -24,7 +26,9 @@ const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
 /**
  * Stateful extractor that tracks how many complete <message> blocks have
- * already been returned. Each call returns only newly-closed blocks.
+ * already been returned. Each call returns only newly-closed blocks, with
+ * their position index in the full text so callers can correlate against
+ * the final `result` pass.
  *
  * Closed-only: a block whose opening tag has appeared but whose closing tag
  * hasn't yet is not returned. The blocks dispatched here must be identical
@@ -44,7 +48,7 @@ export function createStreamExtractor(): {
       let match: RegExpExecArray | null;
       while ((match = MESSAGE_RE.exec(text)) !== null) {
         if (idx >= alreadyReturned) {
-          out.push({ to: match[1], body: match[2].trim() });
+          out.push({ index: idx, to: match[1], body: match[2].trim() });
         }
         idx++;
       }

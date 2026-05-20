@@ -50,8 +50,12 @@ whole reply is generated. The ~1–2s headline win requires Stage 2.
 - `container/agent-runner/src/poll-loop.ts` — gated by
   `NANOCLAW_STREAM_REPLIES=1`. On `partial`, run the extractor and dispatch
   newly-closed blocks via the same `sendToDestination` path the result-event
-  handler uses. Track `earlyDispatched` count; pass it as `skipFirstBlocks`
-  to `dispatchResultText` so the result pass doesn't re-send.
+  handler uses. Track *successfully dispatched* block indices in a set and
+  pass it to `dispatchResultText`, which skips only those indices on the
+  result pass. Blocks with unknown destinations stay unset, so the result
+  pass scratchpad-logs them and the unwrapped-output nudge still fires when
+  no block resolved. The extractor and the dispatched-index set reset on
+  every `init` event (e.g. PreCompact mid-stream).
 
 ### Enabling
 
