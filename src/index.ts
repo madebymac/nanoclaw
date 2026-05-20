@@ -16,7 +16,11 @@ import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runti
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
-import { log } from './log.js';
+import { log, installConsoleCapture } from './log.js';
+
+// Route stray console.* writes from third-party deps through our logger so
+// they get the same timestamp+level prefix as everything else.
+installConsoleCapture();
 
 // Response + shutdown registries live in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
