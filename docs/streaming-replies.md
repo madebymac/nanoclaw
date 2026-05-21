@@ -12,8 +12,9 @@ This is being delivered in stages. The current branch ships **Stage 1**.
 | Stage | What | Status |
 |-------|------|--------|
 | 1 | Provider `partial` event; early-dispatch of *closed* `<message>` blocks before the `result` event arrives | shipped |
-| 2 | Mid-block streaming via edit-on-existing-message + adapter `supportsEdits` flag + host-side seq→platform_id resolution | designed, not implemented |
-| 3 | Per-channel rate limiting (Telegram = 1 edit/sec/chat); fallback to one-shot for adapters without edit support | designed, not implemented |
+| 2a | Host-side `stream_edit` recognition: resolve `targetMessageOutId` via `delivered` table → `edit` op; coalesce superseded edits | shipped (dead code until 2b) |
+| 2b | Container writer: per-destination throttled `stream_edit` flushes while the trailing `<message>` block is still open | designed, not implemented |
+| 3 | Per-channel rate limiting (Telegram = 1 edit/sec/chat); adapter `supportsEdits` flag and fallback for adapters without edit support | designed, not implemented |
 
 ## Stage 1 — closed-block early dispatch
 
@@ -84,21 +85,32 @@ this is a no-op until an operator opts in.
 - Each `<message>` block is still a separate `messages_out` row, so
   delivery, retries, and the `delivered` table behave exactly as today.
 
-## Stage 2 — mid-block streaming (design)
+## Stage 2a — host-side resolver (shipped, dead code today)
 
-**Schema**
-
-`messages_out.content` gains a new operation:
+The host already recognises a new content op:
 
 ```json
 { "operation": "stream_edit", "targetMessageOutId": "msg-…", "text": "…" }
 ```
 
-Unlike `operation: "edit"` (which requires a known `platform_message_id` at
-write time), `stream_edit` references the original `messages_out.id`. The
-host resolves it to a platform message ID via the `delivered` table at
-delivery time. If the original hasn't been delivered yet, the host defers
-the chunk and retries on the next drain — same retry loop, no new state.
+Unlike `operation: "edit"` (which requires a known `platform_message_id`
+at write time), `stream_edit` references the original `messages_out.id`.
+`src/delivery.ts` resolves it to a platform message ID via the `delivered`
+table at delivery time (`getDeliveredPlatformId`), then rewrites the
+payload into a regular `edit` op the channel adapter already understands.
+If the target hasn't been delivered yet, delivery throws and the row sits
+in the existing 3-attempt retry path — no new state.
+
+The drain pass also coalesces superseded `stream_edit` rows: if several
+target the same `messages_out.id` in a single pass, only the newest hits
+the adapter — the earlier ones are marked delivered without a send. Every
+edit is a full replacement, so superseded ones would just waste budget
+against the per-chat rate limit.
+
+Nothing writes `stream_edit` rows yet — Stage 2b adds the container-side
+writer.
+
+## Stage 2b — container writer (design)
 
 **Container**
 
@@ -114,18 +126,7 @@ Per active destination (keyed by `channel_type|platform_id|thread_id`):
 3. Block closes → flush one final `stream_edit` with the closed text, then
    reset the per-destination state for the next block.
 
-**Host**
-
-`src/delivery.ts`:
-
-- Recognize `content.operation === 'stream_edit'`. Look up
-  `delivered.platform_message_id` for `content.targetMessageOutId`. If
-  missing → throw to retry path (existing 3-attempt backoff). If found →
-  build an `edit` op with the resolved platform ID and dispatch as today.
-- Coalesce: when multiple undelivered `stream_edit` rows for the same
-  target are queued, deliver only the latest. (Telegram and most chat
-  APIs treat each edit as a full replacement; superseded edits are
-  wasted requests.)
+**Host** (Stage 3 — not yet implemented)
 
 `src/channels/adapter.ts`:
 
@@ -146,6 +147,8 @@ sentinel status (`skipped_no_edit_support`) for observability.
 ## Testing
 
 Stage 1 has unit tests for the extractor at
-`container/agent-runner/src/stream-dispatch.test.ts`. End-to-end testing
-requires `NANOCLAW_STREAM_REPLIES=1` plus a channel adapter, which lives on
-the `channels` branch — verify there before relying on the behavior.
+`container/agent-runner/src/stream-dispatch.test.ts`. Stage 2a has host
+delivery tests at `src/delivery.test.ts` covering resolve, retry-then-
+succeed once the target lands, and coalescing of superseded edits. End-to-
+end testing requires `NANOCLAW_STREAM_REPLIES=1` plus the container writer
+(Stage 2b) plus a channel adapter, which lives on the `channels` branch.
