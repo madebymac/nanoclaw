@@ -70,6 +70,20 @@ function insertOutbound(agentGroupId: string, sessionId: string, msgId: string):
   db.close();
 }
 
+function insertOutboundContent(
+  agentGroupId: string,
+  sessionId: string,
+  msgId: string,
+  content: Record<string, unknown>,
+): void {
+  const db = new Database(outboundDbPath(agentGroupId, sessionId));
+  db.prepare(
+    `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+     VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
+  ).run(msgId, JSON.stringify(content));
+  db.close();
+}
+
 beforeEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
@@ -269,5 +283,118 @@ describe('deliverSessionMessages — permission check', () => {
     const delivered = getDeliveredIds(inDb);
     inDb.close();
     expect(delivered.has('out-unauth')).toBe(true);
+  });
+});
+
+describe('deliverSessionMessages — stream_edit', () => {
+  it('resolves stream_edit target via delivered.platform_message_id and rewrites to edit op', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    // Initial streamed row (the row a stream_edit references).
+    insertOutbound('ag-1', session.id, 'out-stream-init');
+    // Edit referencing it.
+    insertOutboundContent('ag-1', session.id, 'out-stream-edit', {
+      operation: 'stream_edit',
+      targetMessageOutId: 'out-stream-init',
+      text: 'hello world',
+    });
+
+    const received: Array<{ kind: string; content: string }> = [];
+    let platformId = 0;
+    setDeliveryAdapter({
+      async deliver(_channelType, _platformId, _threadId, kind, content) {
+        received.push({ kind, content });
+        return `plat-msg-${++platformId}`;
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(received).toHaveLength(2);
+    // First call: the initial row, vanilla text.
+    expect(JSON.parse(received[0].content)).toEqual({ text: 'hello' });
+    // Second call: the stream_edit was rewritten into a standard edit op
+    // with messageId resolved from the delivered table.
+    expect(JSON.parse(received[1].content)).toEqual({
+      operation: 'edit',
+      messageId: 'plat-msg-1',
+      text: 'hello world',
+    });
+  });
+
+  it('soft-defers a stream_edit when its target has not been delivered yet', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    // stream_edit alone — target is missing from delivered. Adapter
+    // should not be called for this row, and the row stays undelivered
+    // (no entry in `delivered`) so the next poll will retry without
+    // burning a retry attempt.
+    insertOutboundContent('ag-1', session.id, 'out-edit-orphan', {
+      operation: 'stream_edit',
+      targetMessageOutId: 'out-missing',
+      text: 'never lands',
+    });
+
+    let callCount = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        callCount++;
+        return 'plat';
+      },
+    });
+
+    // Three poll iterations — without the soft-defer path, attempt #3
+    // would mark it failed. With the soft-defer, no attempts accrue and
+    // nothing is written to `delivered`.
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+
+    expect(callCount).toBe(0);
+    const inDb = openInboundDb('ag-1', session.id);
+    const delivered = getDeliveredIds(inDb);
+    inDb.close();
+    expect(delivered.has('out-edit-orphan')).toBe(false);
+  });
+
+  it('fails hard when stream_edit target is marked failed (cannot be edited)', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    // Pre-seed the delivered table: target is in `failed` state.
+    const inDb = openInboundDb('ag-1', session.id);
+    inDb
+      .prepare(
+        "INSERT INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, NULL, 'failed', datetime('now'))",
+      )
+      .run('out-failed-target');
+    inDb.close();
+
+    insertOutboundContent('ag-1', session.id, 'out-edit-of-failed', {
+      operation: 'stream_edit',
+      targetMessageOutId: 'out-failed-target',
+      text: 'attempt to edit something that never landed',
+    });
+
+    let callCount = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        callCount++;
+        return 'plat';
+      },
+    });
+
+    // Three iterations → marked failed (hard error, not soft defer).
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+
+    expect(callCount).toBe(0);
+    const inDb2 = openInboundDb('ag-1', session.id);
+    const delivered = getDeliveredIds(inDb2);
+    inDb2.close();
+    expect(delivered.has('out-edit-of-failed')).toBe(true);
   });
 });

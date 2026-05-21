@@ -12,8 +12,8 @@ This is being delivered in stages. The current branch ships **Stage 1**.
 | Stage | What | Status |
 |-------|------|--------|
 | 1 | Provider `partial` event; early-dispatch of *closed* `<message>` blocks before the `result` event arrives | shipped |
-| 2 | Mid-block streaming via edit-on-existing-message + adapter `supportsEdits` flag + host-side seq→platform_id resolution | designed, not implemented |
-| 3 | Per-channel rate limiting (Telegram = 1 edit/sec/chat); fallback to one-shot for adapters without edit support | designed, not implemented |
+| 2 | Mid-block streaming via `stream_edit` content op + host-side resolution through the `delivered` table | shipped |
+| 3 | Channel-adapter `supportsEdits` capability flag + no-edit fallback (drop intermediate edits, deliver only final) | not implemented |
 
 ## Stage 1 — closed-block early dispatch
 
@@ -84,64 +84,109 @@ this is a no-op until an operator opts in.
 - Each `<message>` block is still a separate `messages_out` row, so
   delivery, retries, and the `delivered` table behave exactly as today.
 
-## Stage 2 — mid-block streaming (design)
+## Stage 2 — mid-block streaming
 
-**Schema**
+Ships in the same branch as Stage 1's follow-up PR. Gated by a second
+opt-in env var **on top of** `NANOCLAW_STREAM_REPLIES`:
 
-`messages_out.content` gains a new operation:
+```
+NANOCLAW_STREAM_REPLIES=1          # required (Stage 1 baseline)
+NANOCLAW_STREAM_PARTIAL_BLOCKS=1   # enable Stage 2 mid-block streaming
+NANOCLAW_STREAM_THROTTLE_MS=1500   # optional, default 1500 (Telegram-safe)
+```
+
+### Schema
+
+`messages_out.content` gains a new operation, written by the container
+and consumed by the host at delivery time:
 
 ```json
 { "operation": "stream_edit", "targetMessageOutId": "msg-…", "text": "…" }
 ```
 
-Unlike `operation: "edit"` (which requires a known `platform_message_id` at
-write time), `stream_edit` references the original `messages_out.id`. The
-host resolves it to a platform message ID via the `delivered` table at
-delivery time. If the original hasn't been delivered yet, the host defers
-the chunk and retries on the next drain — same retry loop, no new state.
+Unlike `operation: "edit"` (which requires a known `platform_message_id`
+at write time), `stream_edit` references the *original* `messages_out.id`.
+The host resolves it to a platform message ID via the `delivered` table
+at delivery time. No schema migration — `content` is opaque TEXT.
 
-**Container**
+### Container
 
-Per active destination (keyed by `channel_type|platform_id|thread_id`):
+When `NANOCLAW_STREAM_PARTIAL_BLOCKS=1`, the streaming extractor reports
+the trailing open `<message>` block in addition to newly-closed blocks
+(`stream-dispatch.ts:extract`). `poll-loop.ts` maintains a single
+`TrailingStreamState` per turn (only ever one trailing block at a time —
+the stream grows at the tail):
 
-1. First closed block in a streaming turn → ordinary send (no change).
-2. While the trailing block is *open*, on each `partial` event:
-   - Throttle to a minimum interval per destination (default 1500ms; per-
-     channel override in container config to respect e.g. Telegram's
-     1-edit/sec/chat limit).
-   - Write a `stream_edit` row targeting the most recent open block's
-     `messages_out.id`, with the latest accumulated text.
-3. Block closes → flush one final `stream_edit` with the closed text, then
-   reset the per-destination state for the next block.
+1. First time we see a trailing block with a non-empty body, write a
+   normal `messages_out` row (`{ text: body }`) and remember its
+   `messages_out.id` + body + flush time.
+2. On each subsequent `partial` event, if the body changed AND the
+   throttle window has elapsed, write a `stream_edit` row targeting the
+   remembered id.
+3. When the block closes (next `partial` or the final `result`),
+   write one final `stream_edit` with the closed body, then clear state.
 
-**Host**
+The closed-block path from Stage 1 detects "this index was the streaming
+slot" and skips the new-row dispatch — the final `stream_edit` is
+authoritative.
 
-`src/delivery.ts`:
+### Host
 
-- Recognize `content.operation === 'stream_edit'`. Look up
-  `delivered.platform_message_id` for `content.targetMessageOutId`. If
-  missing → throw to retry path (existing 3-attempt backoff). If found →
-  build an `edit` op with the resolved platform ID and dispatch as today.
-- Coalesce: when multiple undelivered `stream_edit` rows for the same
-  target are queued, deliver only the latest. (Telegram and most chat
-  APIs treat each edit as a full replacement; superseded edits are
-  wasted requests.)
+`src/delivery.ts` recognizes `content.operation === 'stream_edit'`:
 
-`src/channels/adapter.ts`:
+- Looks up `delivered.platform_message_id` for `content.targetMessageOutId`.
+- **Target not yet delivered** → throws `DeferredDeliveryError`. The
+  delivery loop catches this specifically and leaves the row pending
+  *without* burning a retry attempt. Next poll tick tries again.
+- **Target delivered** → rewrites content to
+  `{ operation: 'edit', messageId: <resolved>, text }` and hands to the
+  channel adapter, which already understands `edit`.
+- **Target failed** → throws a regular Error. The normal retry/give-up
+  path marks this stream_edit row failed too (the platform message it
+  was meant to update never existed).
 
-- Add `supportsEdits?: boolean` (default `true`; explicit `false` for
-  channels that can't edit, e.g. SMTP-style adapters).
-- Delivery skips `stream_edit` rows for adapters without edit support;
-  the final block-close `stream_edit` still becomes a one-shot send
-  through the `result` path because Stage 1 dispatches the closed block
-  via `sendToDestination`.
+### Correctness notes
 
-**Fallback**
+- The throttle is per turn, not per process — re-resets on `init`.
+  PreCompact mid-stream gets a fresh state machine.
+- If the trailing block's destination is unknown to the agent group,
+  nothing is written and state stays null; the closed-block path will
+  scratchpad-log it as today.
+- A safety fallback in the result handler writes a final `stream_edit`
+  even when the trailing block "never closed" (e.g. the agent stopped
+  mid-tag). The user sees the last streamed body rather than a stale
+  partial.
 
-Adapters without edit support get Stage 1 behavior only. The user sees
-the final block when it closes; intermediate `stream_edit` rows are
-dropped at delivery time and the `delivered` row is marked with a
-sentinel status (`skipped_no_edit_support`) for observability.
+### What's intentionally not in this stage
+
+- **Adapter capability negotiation.** Adapters without
+  `editMessage` support will silently no-op the rewritten edits; the
+  user sees a partial-truncated initial message. Operators must only
+  enable `NANOCLAW_STREAM_PARTIAL_BLOCKS=1` on installs whose channels
+  support edits (Telegram does; Slack/Discord/Matrix do; Resend/SMTP
+  don't). Stage 3 will add the `supportsEdits` flag and a fallback that
+  drops intermediate edits and replays the final body as a fresh row.
+- **Edit coalescing in the delivery drain.** With a 1.5s throttle and
+  per-1s poll, at most ~1 pending `stream_edit` per target per drain in
+  practice. Coalescing is a follow-up if it becomes a problem.
+
+## Stage 3 — channel capability + fallback (design)
+
+When implemented:
+
+- `src/channels/adapter.ts` gains `supportsEdits?: boolean` (default
+  `true` for backwards compatibility).
+- `src/delivery.ts` checks the adapter's flag before resolving
+  `stream_edit`. If `false`:
+  - Drop intermediate edits silently (mark delivered with status
+    `skipped_no_edit_support` or similar).
+  - When the *final* edit lands (detectable via a `final: true` flag
+    on the `stream_edit` content or by being the last edit before the
+    `result`), deliver it as a fresh text message instead of an edit,
+    so the user sees the complete body once.
+- The container can also opt out of streaming entirely for channels
+  whose adapter declares no edit support, once that capability is
+  surfaced through the destination registry.
 
 ## Testing
 

@@ -31,6 +31,19 @@ const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
 
+/**
+ * Thrown from `deliverMessage` when a stream_edit's target hasn't been
+ * delivered yet. The delivery loop catches this and leaves the row
+ * undelivered without burning a retry attempt — the next poll tick will
+ * try again. Distinct from a delivery error.
+ */
+class DeferredDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeferredDeliveryError';
+  }
+}
+
 /** Track delivery attempt counts. Resets on process restart (gives failed messages a fresh chance). */
 const deliveryAttempts = new Map<string, number>();
 
@@ -203,6 +216,16 @@ async function drainSession(session: Session): Promise<void> {
           pauseTypingRefreshAfterDelivery(session.id);
         }
       } catch (err) {
+        // Soft-defer: target row for a stream_edit isn't delivered yet.
+        // Don't mark this row delivered, don't count it as a retry — it
+        // just stays pending and we'll try again on the next poll tick.
+        if (err instanceof DeferredDeliveryError) {
+          log.debug('Deferring stream_edit until target delivered', {
+            messageId: msg.id,
+            reason: err.message,
+          });
+          continue;
+        }
         const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
         deliveryAttempts.set(msg.id, attempts);
         if (attempts >= MAX_DELIVERY_ATTEMPTS) {
@@ -345,6 +368,34 @@ async function deliverMessage(
     return;
   }
 
+  // stream_edit: container wrote this referring to a previous outbound
+  // row's id. We resolve to the platform_message_id the host stamped on
+  // `delivered` when the original was sent, then deliver as a regular
+  // edit op. Three outcomes:
+  //   - target row not yet in `delivered` → soft-defer (DeferredDeliveryError)
+  //   - target row delivered → rewrite content and proceed
+  //   - target row failed → propagate as a hard error (this edit can never
+  //     land; let the normal retry/give-up path mark it failed)
+  let outboundContent = msg.content;
+  if (content.operation === 'stream_edit' && typeof content.targetMessageOutId === 'string') {
+    const row = inDb
+      .prepare('SELECT status, platform_message_id FROM delivered WHERE message_out_id = ?')
+      .get(content.targetMessageOutId) as
+      | { status: string; platform_message_id: string | null }
+      | undefined;
+    if (!row) {
+      throw new DeferredDeliveryError(`target ${content.targetMessageOutId} not yet delivered`);
+    }
+    if (row.status !== 'delivered' || !row.platform_message_id) {
+      throw new Error(`stream_edit target ${content.targetMessageOutId} status=${row.status} — cannot edit`);
+    }
+    outboundContent = JSON.stringify({
+      operation: 'edit',
+      messageId: row.platform_message_id,
+      text: content.text,
+    });
+  }
+
   // Read file attachments from outbox if the content declares files.
   // File I/O lives in session-manager.ts (symmetric with inbound
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.
@@ -358,7 +409,7 @@ async function deliverMessage(
     msg.platform_id,
     msg.thread_id,
     msg.kind,
-    msg.content,
+    outboundContent,
     files,
   );
   log.info('Message delivered', {

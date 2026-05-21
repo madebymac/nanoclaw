@@ -55,4 +55,49 @@ describe('createStreamExtractor', () => {
       { index: 1, to: 'bob', body: 'there' },
     ]);
   });
+
+  test('extract returns trailing open block', () => {
+    const ex = createStreamExtractor();
+    const r = ex.extract('<message to="alice">hello wor');
+    expect(r.newlyClosed).toEqual([]);
+    expect(r.trailing).toEqual({ index: 0, to: 'alice', partialBody: 'hello wor' });
+  });
+
+  test('extract returns trailing after closed blocks', () => {
+    const ex = createStreamExtractor();
+    const r = ex.extract('<message to="alice">done</message><message to="bob">in pro');
+    expect(r.newlyClosed).toEqual([{ index: 0, to: 'alice', body: 'done' }]);
+    expect(r.trailing).toEqual({ index: 1, to: 'bob', partialBody: 'in pro' });
+  });
+
+  test('extract: trailing disappears once closed', () => {
+    const ex = createStreamExtractor();
+    let r = ex.extract('<message to="alice">part');
+    expect(r.trailing).toEqual({ index: 0, to: 'alice', partialBody: 'part' });
+    r = ex.extract('<message to="alice">partial done</message>');
+    expect(r.newlyClosed).toEqual([{ index: 0, to: 'alice', body: 'partial done' }]);
+    expect(r.trailing).toBeNull();
+  });
+
+  test('extract: text before open tag is not trailing', () => {
+    const ex = createStreamExtractor();
+    const r = ex.extract('<message to="a">done</message>  thinking out loud  ');
+    expect(r.newlyClosed).toEqual([{ index: 0, to: 'a', body: 'done' }]);
+    expect(r.trailing).toBeNull();
+  });
+
+  test('extract: partial open tag (no closing >) is not yet a trailing block', () => {
+    const ex = createStreamExtractor();
+    const r = ex.extract('thinking… <message to="a');
+    expect(r.newlyClosed).toEqual([]);
+    expect(r.trailing).toBeNull();
+  });
+
+  test('extract: trailing block index increments past prior closed blocks', () => {
+    const ex = createStreamExtractor();
+    ex.extract('<message to="a">first</message>');
+    const r = ex.extract('<message to="a">first</message><message to="b">');
+    expect(r.newlyClosed).toEqual([]);
+    expect(r.trailing).toEqual({ index: 1, to: 'b', partialBody: '' });
+  });
 });

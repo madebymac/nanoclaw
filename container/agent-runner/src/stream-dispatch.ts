@@ -22,38 +22,84 @@ export interface ExtractedBlock {
   body: string;
 }
 
-const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
+/**
+ * The currently-open (unclosed) <message> block at the tail of the
+ * accumulated text, if any. Its `index` is the position it WILL occupy
+ * once it closes — i.e. one past the highest closed-block index seen.
+ */
+export interface TrailingBlock {
+  index: number;
+  to: string;
+  partialBody: string;
+}
+
+export interface ExtractionResult {
+  /** Blocks that closed since the previous call. */
+  newlyClosed: ExtractedBlock[];
+  /** Currently-open trailing block, or null if none. */
+  trailing: TrailingBlock | null;
+}
+
+const CLOSED_BLOCK_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
+const OPEN_BLOCK_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*)$/;
 
 /**
- * Stateful extractor that tracks how many complete <message> blocks have
- * already been returned. Each call returns only newly-closed blocks, with
- * their position index in the full text so callers can correlate against
- * the final `result` pass.
+ * Stateful extractor for the streaming dispatch path.
  *
- * Closed-only: a block whose opening tag has appeared but whose closing tag
- * hasn't yet is not returned. The blocks dispatched here must be identical
- * to what `dispatchResultText` would extract from the final `result` text,
- * so we never send a half-finished message.
+ * - `extract(text)` returns newly-closed `<message>` blocks (with index)
+ *   plus the trailing open block, if one is currently in progress.
+ * - The "trailing open block" is the prefix of text after the last
+ *   `</message>` that starts with a fresh `<message to="…">` opening tag
+ *   whose closer hasn't arrived yet.
+ *
+ * Closed blocks dispatched here are identical to what `dispatchResultText`
+ * would extract from the final `result` text, so we never send a
+ * half-finished closed message. Trailing partials are explicitly partial
+ * and the caller is responsible for writing them as editable rows.
  */
 export function createStreamExtractor(): {
+  extract(text: string): ExtractionResult;
+  /** Test helper: backward-compatible newly-closed-only path. */
   extractNewlyClosed(text: string): ExtractedBlock[];
   count(): number;
 } {
   let alreadyReturned = 0;
-  return {
-    extractNewlyClosed(text: string): ExtractedBlock[] {
-      const out: ExtractedBlock[] = [];
-      let idx = 0;
-      MESSAGE_RE.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      while ((match = MESSAGE_RE.exec(text)) !== null) {
-        if (idx >= alreadyReturned) {
-          out.push({ index: idx, to: match[1], body: match[2].trim() });
-        }
-        idx++;
+
+  function extract(text: string): ExtractionResult {
+    const newlyClosed: ExtractedBlock[] = [];
+    let idx = 0;
+    let lastCloseEnd = 0;
+    CLOSED_BLOCK_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = CLOSED_BLOCK_RE.exec(text)) !== null) {
+      if (idx >= alreadyReturned) {
+        newlyClosed.push({ index: idx, to: match[1], body: match[2].trim() });
       }
-      alreadyReturned = idx;
-      return out;
+      idx++;
+      lastCloseEnd = CLOSED_BLOCK_RE.lastIndex;
+    }
+    alreadyReturned = idx;
+
+    // Anything after the last </message> may contain an open <message>.
+    const tail = text.slice(lastCloseEnd);
+    const openMatch = OPEN_BLOCK_RE.exec(tail);
+    const trailing: TrailingBlock | null = openMatch
+      ? {
+          index: idx,
+          to: openMatch[1],
+          // Don't trim — leading/trailing whitespace is meaningful while
+          // the model is still typing. Caller trims for display.
+          partialBody: openMatch[2],
+        }
+      : null;
+
+    return { newlyClosed, trailing };
+  }
+
+  return {
+    extract,
+    extractNewlyClosed(text: string): ExtractedBlock[] {
+      return extract(text).newlyClosed;
     },
     count(): number {
       return alreadyReturned;

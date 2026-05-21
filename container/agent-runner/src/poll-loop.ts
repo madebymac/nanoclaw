@@ -14,9 +14,20 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
-import { createStreamExtractor, type ExtractedBlock } from './stream-dispatch.js';
+import { createStreamExtractor, type ExtractedBlock, type TrailingBlock } from './stream-dispatch.js';
 
 const STREAM_REPLIES = process.env.NANOCLAW_STREAM_REPLIES === '1';
+/** Stage 2: stream the trailing open <message> block via stream_edit rows. */
+const STREAM_PARTIAL_BLOCKS = process.env.NANOCLAW_STREAM_PARTIAL_BLOCKS === '1';
+/**
+ * Minimum gap between successive stream_edit writes for the same trailing
+ * block. Default sized for Telegram's 1 edit/sec/chat rate limit with a
+ * small safety margin. Override with NANOCLAW_STREAM_THROTTLE_MS.
+ */
+const STREAM_THROTTLE_MS = (() => {
+  const raw = Number(process.env.NANOCLAW_STREAM_THROTTLE_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 1500;
+})();
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -291,6 +302,12 @@ async function processQuery(
   // Reset on each `init` (e.g. PreCompact starts a fresh turn).
   let streamExtractor = STREAM_REPLIES ? createStreamExtractor() : null;
   let earlyDispatched: Set<number> = new Set();
+  // Stage 2 streaming state for the trailing open <message> block. At most
+  // one trailing block is in flight at any moment (it's the tail of the
+  // accumulated text). When the block closes, we issue a final stream_edit
+  // and clear the slot; the closed-block dispatch path skips it because
+  // its index is already in earlyDispatched.
+  let trailingStream: TrailingStreamState | null = null;
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -374,9 +391,22 @@ async function processQuery(
       touchHeartbeat();
 
       if (event.type === 'partial' && streamExtractor) {
-        const newlyClosed = streamExtractor.extractNewlyClosed(event.text);
+        const { newlyClosed, trailing } = streamExtractor.extract(event.text);
+        // Closed-block dispatch (Stage 1). If a block index matches the
+        // currently-streaming trailing slot, treat the close as the
+        // final stream_edit and skip the new-row path.
         for (const block of newlyClosed) {
+          if (trailingStream && block.index === trailingStream.index) {
+            finalizeTrailingStream(trailingStream, block.body);
+            earlyDispatched.add(block.index);
+            trailingStream = null;
+            continue;
+          }
           if (dispatchBlock(block, routing)) earlyDispatched.add(block.index);
+        }
+        // Trailing partial: optionally stream via stream_edit (Stage 2).
+        if (STREAM_PARTIAL_BLOCKS) {
+          trailingStream = advanceTrailingStream(trailingStream, trailing, routing);
         }
       } else if (event.type === 'init') {
         queryContinuation = event.continuation;
@@ -385,6 +415,7 @@ async function processQuery(
         if (STREAM_REPLIES) {
           streamExtractor = createStreamExtractor();
           earlyDispatched = new Set();
+          trailingStream = null;
         }
         // Persist immediately so a mid-turn container crash still lets the
         // next wake resume the conversation. Without this, the session id
@@ -402,6 +433,25 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
+          // If we were streaming a trailing block and the final `result`
+          // text now contains it as a closed block, finalize it via
+          // stream_edit and mark its index dispatched so dispatchResultText
+          // skips it. Without this the closed-block path would re-send the
+          // same text as a fresh row.
+          if (trailingStream) {
+            const closedBody = findClosedBlockBody(event.text, trailingStream.index);
+            if (closedBody !== null) {
+              finalizeTrailingStream(trailingStream, closedBody);
+              earlyDispatched.add(trailingStream.index);
+            } else {
+              // The trailing block never closed (e.g. agent stopped without
+              // closing the tag). Best effort: finalize with whatever was
+              // streamed so the user isn't left with a stale partial.
+              finalizeTrailingStream(trailingStream, trailingStream.lastBody);
+              earlyDispatched.add(trailingStream.index);
+            }
+            trailingStream = null;
+          }
           const { hasUnwrapped } = dispatchResultText(event.text, routing, earlyDispatched);
           // earlyDispatched is consumed; reset for any subsequent turn that
           // reuses this processQuery invocation (currently none, but the
@@ -509,6 +559,167 @@ function dispatchResultText(
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
   return { sent, hasUnwrapped };
+}
+
+/**
+ * Per-destination state for an in-flight trailing <message> block being
+ * streamed via stream_edit rows. Only one trailing block exists at a time
+ * because the stream always grows at the tail.
+ */
+interface TrailingStreamState {
+  /** Index this block occupies in the accumulated text. */
+  index: number;
+  /** Destination name from the opening `<message to="…">` tag. */
+  to: string;
+  /**
+   * `messages_out.id` of the initial row sent for this block. The host
+   * resolves this to a platform_message_id via the `delivered` table at
+   * delivery time and edits that platform message in place.
+   */
+  messageOutId: string;
+  /** Last body actually flushed to outbound.db (trimmed). */
+  lastBody: string;
+  /** Wall-clock ms of the last flush, for throttling. */
+  lastFlushAt: number;
+}
+
+/**
+ * Trim a body for streaming. Mid-stream we expect trailing whitespace as
+ * the model emits tokens; users shouldn't see jittery trailing spaces.
+ * Mirrors the trim() in closed-block dispatch.
+ */
+function trimStreamBody(s: string): string {
+  return s.trim();
+}
+
+/**
+ * Open a new trailing-stream slot, or update an existing one with a
+ * throttled stream_edit. Returns the (possibly mutated) state.
+ *
+ * Three cases:
+ * - `trailing` is null → close out any prior state (caller handles the
+ *   close path on `newlyClosed`); return null.
+ * - No prior state → open: write the initial messages_out row and
+ *   record the id for subsequent edits.
+ * - Prior state exists → check destination match and throttle, then
+ *   write a stream_edit row targeting the initial row's id.
+ *
+ * If the destination is unknown (findByName misses), nothing is written
+ * and state is cleared — the closed-block dispatch path will log it as
+ * an unknown destination once the block closes.
+ */
+function advanceTrailingStream(
+  prev: TrailingStreamState | null,
+  trailing: TrailingBlock | null,
+  routing: RoutingContext,
+): TrailingStreamState | null {
+  if (!trailing) return null;
+  const body = trimStreamBody(trailing.partialBody);
+
+  // No prior streaming → try to open.
+  if (!prev || prev.index !== trailing.index || prev.to !== trailing.to) {
+    if (!body) return prev ?? null; // nothing to send yet
+    const dest = findByName(trailing.to);
+    if (!dest) {
+      log(`Stream-partial: unknown destination "${trailing.to}", deferring to result-event path`);
+      return null;
+    }
+    const id = generateId();
+    const destRouting = resolveDestinationThread(
+      dest.type === 'channel' ? dest.channelType! : 'agent',
+      dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!,
+    );
+    writeMessageOut({
+      id,
+      in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+      kind: 'chat',
+      platform_id: dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!,
+      channel_type: dest.type === 'channel' ? dest.channelType! : 'agent',
+      thread_id: destRouting?.threadId ?? null,
+      content: JSON.stringify({ text: body }),
+    });
+    log(`Stream-partial: opened block ${trailing.index} → ${trailing.to} (${body.length} chars)`);
+    return { index: trailing.index, to: trailing.to, messageOutId: id, lastBody: body, lastFlushAt: Date.now() };
+  }
+
+  // Same block continues. Throttle + dedup.
+  if (body === prev.lastBody) return prev;
+  const now = Date.now();
+  if (now - prev.lastFlushAt < STREAM_THROTTLE_MS) return prev;
+
+  const dest = findByName(prev.to);
+  if (!dest) {
+    log(`Stream-partial: destination "${prev.to}" disappeared mid-stream — abandoning`);
+    return null;
+  }
+  const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+  const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  const destRouting = resolveDestinationThread(channelType, platformId);
+  writeMessageOut({
+    id: generateId(),
+    kind: 'chat',
+    platform_id: platformId,
+    channel_type: channelType,
+    thread_id: destRouting?.threadId ?? null,
+    content: JSON.stringify({ operation: 'stream_edit', targetMessageOutId: prev.messageOutId, text: body }),
+  });
+  log(`Stream-partial: edit block ${prev.index} → ${prev.to} (${body.length} chars)`);
+  return { ...prev, lastBody: body, lastFlushAt: now };
+}
+
+/**
+ * Write a final stream_edit for a streamed block with its closed body.
+ * Mirrors mid-stream edits but always fires regardless of throttle since
+ * this is the user-visible final text.
+ */
+function finalizeTrailingStream(state: TrailingStreamState, finalBody: string): void {
+  const body = trimStreamBody(finalBody);
+  if (body === state.lastBody) {
+    log(`Stream-partial: closed block ${state.index} → ${state.to} (no diff, skipping final edit)`);
+    return;
+  }
+  // We don't have routing handy here; the host edits by platform_message_id
+  // which it resolves from `delivered`, so channel_type/platform_id on this
+  // row aren't used for routing the edit — only for permission checks
+  // (which match the original row's destination). We re-use the original
+  // row's destination via a fresh writeMessageOut that omits routing fields;
+  // delivery will look them up from the resolved target.
+  // For simplicity and to preserve existing permission checks, callers pass
+  // routing-bearing dests through advanceTrailingStream first, so by the
+  // time we finalize, the destination is known to be valid.
+  const dest = findByName(state.to);
+  if (!dest) {
+    log(`Stream-partial: destination "${state.to}" disappeared between open and close — skipping final edit`);
+    return;
+  }
+  const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+  const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  const destRouting = resolveDestinationThread(channelType, platformId);
+  writeMessageOut({
+    id: generateId(),
+    kind: 'chat',
+    platform_id: platformId,
+    channel_type: channelType,
+    thread_id: destRouting?.threadId ?? null,
+    content: JSON.stringify({ operation: 'stream_edit', targetMessageOutId: state.messageOutId, text: body }),
+  });
+  log(`Stream-partial: closed block ${state.index} → ${state.to} (final ${body.length} chars)`);
+}
+
+/**
+ * Find the body of the Nth closed <message> block in `text` (zero-indexed).
+ * Returns null if there are fewer than N+1 closed blocks. Used to reconcile
+ * trailing-stream state against the authoritative `result` text.
+ */
+function findClosedBlockBody(text: string, index: number): string | null {
+  const re = /<message\s+to="[^"]+"\s*>([\s\S]*?)<\/message>/g;
+  let i = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (i === index) return m[1].trim();
+    i++;
+  }
+  return null;
 }
 
 /**
