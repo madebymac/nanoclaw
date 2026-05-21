@@ -262,7 +262,7 @@ export function getDueOutboundMessages(db: Database.Database): OutboundMessage[]
     .prepare(
       `SELECT * FROM messages_out
        WHERE (deliver_after IS NULL OR deliver_after <= datetime('now'))
-       ORDER BY timestamp ASC`,
+       ORDER BY timestamp ASC, seq ASC`,
     )
     .all() as OutboundMessage[];
 }
@@ -277,6 +277,34 @@ export function getDeliveredIds(db: Database.Database): Set<string> {
       (r) => r.message_out_id,
     ),
   );
+}
+
+export type DeliveredLookup =
+  | { status: 'missing' }
+  | { status: 'failed' }
+  | { status: 'delivered'; platformMessageId: string | null };
+
+/**
+ * Look up delivery state for a messages_out row. Three outcomes:
+ *
+ * - `missing` — no row in `delivered` yet (still in flight / not attempted).
+ * - `failed` — adapter gave up after MAX_DELIVERY_ATTEMPTS; there is no
+ *   platform message to edit and there never will be.
+ * - `delivered` — successfully sent; `platformMessageId` is the adapter's
+ *   return value (may be null if the adapter doesn't expose IDs, in which
+ *   case an edit also cannot succeed).
+ *
+ * Used by the `stream_edit` delivery op (Stage 2 of streaming replies) to
+ * resolve `targetMessageOutId` → the platform ID needed for an edit call,
+ * and to distinguish "retry later" from "give up immediately".
+ */
+export function getDeliveredLookup(db: Database.Database, messageOutId: string): DeliveredLookup {
+  const row = db
+    .prepare('SELECT platform_message_id, status FROM delivered WHERE message_out_id = ?')
+    .get(messageOutId) as { platform_message_id: string | null; status: string } | undefined;
+  if (!row) return { status: 'missing' };
+  if (row.status === 'failed') return { status: 'failed' };
+  return { status: 'delivered', platformMessageId: row.platform_message_id };
 }
 
 export function markDelivered(db: Database.Database, messageOutId: string, platformMessageId: string | null): void {

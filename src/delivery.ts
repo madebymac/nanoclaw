@@ -16,6 +16,7 @@ import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
+  getDeliveredLookup,
   markDelivered,
   markDeliveryFailed,
   migrateDeliveredTable,
@@ -187,7 +188,33 @@ async function drainSession(session: Session): Promise<void> {
     // Ensure platform_message_id column exists (migration for existing sessions)
     migrateDeliveredTable(inDb);
 
-    for (const msg of undelivered) {
+    // Coalesce superseded stream_edit rows. When multiple stream_edit rows
+    // target the same messages_out.id (e.g. the container flushed five
+    // partials in quick succession before any could be delivered), only the
+    // latest carries text the user should see — every earlier one is a full-
+    // replacement edit immediately overwritten by the next. Mark superseded
+    // rows delivered (without calling the adapter) so the queue drains in
+    // one pass instead of N edits hitting the rate limiter.
+    //
+    // The trailing newest row in each group still goes through the normal
+    // delivery path below.
+    const supersededIds = findSupersededStreamEdits(undelivered);
+    if (supersededIds.size > 0) {
+      for (const id of supersededIds) {
+        markDelivered(inDb, id, null);
+        // The row may have accrued retry counts on prior passes (e.g. the
+        // target wasn't delivered yet). It's done now; drop the entry so
+        // the in-memory map doesn't grow unboundedly over a long run.
+        deliveryAttempts.delete(id);
+      }
+      log.debug('Coalesced superseded stream_edit rows', {
+        sessionId: session.id,
+        count: supersededIds.size,
+      });
+    }
+    const toDeliver = undelivered.filter((m) => !supersededIds.has(m.id));
+
+    for (const msg of toDeliver) {
       try {
         const platformMsgId = await deliverMessage(msg, session, inDb);
         markDelivered(inDb, msg.id, platformMsgId ?? null);
@@ -231,6 +258,43 @@ async function drainSession(session: Session): Promise<void> {
   }
 }
 
+/**
+ * Walk the undelivered queue and return the set of `stream_edit` rows that
+ * have been superseded by a later `stream_edit` targeting the same
+ * messages_out.id. Each edit is a full replacement on the platform side, so
+ * every edit except the newest in a group is wasted work.
+ *
+ * Only the rows in the same drain pass are considered — a stream_edit
+ * delivered last tick is already on the platform; if a new one arrives this
+ * tick, it goes through the normal path and overwrites the platform message.
+ */
+function findSupersededStreamEdits(undelivered: Array<{ id: string; content: string }>): Set<string> {
+  // Map: targetMessageOutId → id of the most recently seen stream_edit row.
+  // Queue is already ordered by timestamp ASC, so the last write wins.
+  const newestPerTarget = new Map<string, string>();
+  const streamEditTargets = new Map<string, string>(); // edit row id → target
+  for (const msg of undelivered) {
+    let content: Record<string, unknown>;
+    try {
+      content = JSON.parse(msg.content);
+    } catch {
+      continue;
+    }
+    if (content.operation !== 'stream_edit') continue;
+    const target = content.targetMessageOutId as string | undefined;
+    if (!target) continue;
+    streamEditTargets.set(msg.id, target);
+    newestPerTarget.set(target, msg.id);
+  }
+  const superseded = new Set<string>();
+  for (const [editId, target] of streamEditTargets) {
+    if (newestPerTarget.get(target) !== editId) {
+      superseded.add(editId);
+    }
+  }
+  return superseded;
+}
+
 async function deliverMessage(
   msg: {
     id: string;
@@ -249,7 +313,55 @@ async function deliverMessage(
     return;
   }
 
-  const content = JSON.parse(msg.content);
+  let content = JSON.parse(msg.content);
+
+  // stream_edit: container references the original messages_out.id rather
+  // than a platform message ID (which it can't know — that's host-side
+  // state). Resolve it against the `delivered` table here, then rewrite
+  // the payload into a regular `edit` op the adapter already understands.
+  //
+  // If the target hasn't been delivered yet (e.g. the first send is still
+  // in flight from a previous drain pass), throw — the existing retry path
+  // will pick it up on the next tick once the target lands.
+  if (content.operation === 'stream_edit') {
+    const target = content.targetMessageOutId as string | undefined;
+    if (!target) {
+      throw new Error(`stream_edit missing targetMessageOutId (message ${msg.id})`);
+    }
+    const lookup = getDeliveredLookup(inDb, target);
+    if (lookup.status === 'failed') {
+      // Target permanently failed — no platform message exists to edit, and
+      // none ever will. Mark this stream_edit failed now instead of burning
+      // 3 retries; the user already missed the original send.
+      log.warn('stream_edit target permanently failed, dropping edit', {
+        messageId: msg.id,
+        targetMessageOutId: target,
+      });
+      markDeliveryFailed(inDb, msg.id);
+      deliveryAttempts.delete(msg.id);
+      return;
+    }
+    if (lookup.status === 'delivered' && !lookup.platformMessageId) {
+      // Target was delivered but the adapter didn't return a platform ID,
+      // so we have nothing to edit against. Same outcome: drop, don't retry.
+      log.warn('stream_edit target has no platform_message_id, dropping edit', {
+        messageId: msg.id,
+        targetMessageOutId: target,
+      });
+      markDeliveryFailed(inDb, msg.id);
+      deliveryAttempts.delete(msg.id);
+      return;
+    }
+    if (lookup.status === 'missing') {
+      throw new Error(`stream_edit target ${target} not yet delivered (message ${msg.id}) — will retry`);
+    }
+    content = {
+      operation: 'edit',
+      messageId: lookup.platformMessageId,
+      text: content.text,
+    };
+    msg = { ...msg, content: JSON.stringify(content) };
+  }
 
   // System actions — handle internally (schedule_task, cancel_task, etc.)
   if (msg.kind === 'system') {
