@@ -16,7 +16,7 @@ import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
-  getDeliveredPlatformId,
+  getDeliveredLookup,
   markDelivered,
   markDeliveryFailed,
   migrateDeliveredTable,
@@ -202,6 +202,10 @@ async function drainSession(session: Session): Promise<void> {
     if (supersededIds.size > 0) {
       for (const id of supersededIds) {
         markDelivered(inDb, id, null);
+        // The row may have accrued retry counts on prior passes (e.g. the
+        // target wasn't delivered yet). It's done now; drop the entry so
+        // the in-memory map doesn't grow unboundedly over a long run.
+        deliveryAttempts.delete(id);
       }
       log.debug('Coalesced superseded stream_edit rows', {
         sessionId: session.id,
@@ -324,13 +328,36 @@ async function deliverMessage(
     if (!target) {
       throw new Error(`stream_edit missing targetMessageOutId (message ${msg.id})`);
     }
-    const platformMessageId = getDeliveredPlatformId(inDb, target);
-    if (!platformMessageId) {
+    const lookup = getDeliveredLookup(inDb, target);
+    if (lookup.status === 'failed') {
+      // Target permanently failed — no platform message exists to edit, and
+      // none ever will. Mark this stream_edit failed now instead of burning
+      // 3 retries; the user already missed the original send.
+      log.warn('stream_edit target permanently failed, dropping edit', {
+        messageId: msg.id,
+        targetMessageOutId: target,
+      });
+      markDeliveryFailed(inDb, msg.id);
+      deliveryAttempts.delete(msg.id);
+      return;
+    }
+    if (lookup.status === 'delivered' && !lookup.platformMessageId) {
+      // Target was delivered but the adapter didn't return a platform ID,
+      // so we have nothing to edit against. Same outcome: drop, don't retry.
+      log.warn('stream_edit target has no platform_message_id, dropping edit', {
+        messageId: msg.id,
+        targetMessageOutId: target,
+      });
+      markDeliveryFailed(inDb, msg.id);
+      deliveryAttempts.delete(msg.id);
+      return;
+    }
+    if (lookup.status === 'missing') {
       throw new Error(`stream_edit target ${target} not yet delivered (message ${msg.id}) — will retry`);
     }
     content = {
       operation: 'edit',
-      messageId: platformMessageId,
+      messageId: lookup.platformMessageId,
       text: content.text,
     };
     msg = { ...msg, content: JSON.stringify(content) };

@@ -7,7 +7,9 @@ row at the end of the turn.
 
 ## Status
 
-This is being delivered in stages. The current branch ships **Stage 1**.
+This is being delivered in stages. Stages 1 and 2a are shipped; 2a is dead
+code (the host recognises `stream_edit` rows) until 2b adds the container-
+side writer that emits them.
 
 | Stage | What | Status |
 |-------|------|--------|

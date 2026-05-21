@@ -366,6 +366,59 @@ describe('deliverSessionMessages — stream_edit resolution', () => {
     await deliverSessionMessages(session);
     expect(calls).toHaveLength(2);
   });
+
+  it('fails fast on stream_edit whose target has permanently failed', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    // Target that will permanently fail (adapter always throws).
+    insertOutboundContent('ag-1', session.id, 'out-bad', { text: 'oops' }, '2026-01-01T00:00:00Z');
+
+    let targetCalls = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        targetCalls++;
+        throw new Error('persistent failure');
+      },
+    });
+
+    // Burn the 3 retries to mark out-bad failed.
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+    expect(targetCalls).toBe(3);
+
+    // Now an edit referencing the failed target arrives.
+    insertOutboundContent(
+      'ag-1',
+      session.id,
+      'edit-doomed',
+      { operation: 'stream_edit', targetMessageOutId: 'out-bad', text: 'too late' },
+      '2026-01-01T00:00:10Z',
+    );
+
+    // Swap to a counting adapter so we can prove the edit never hits it.
+    let editCalls = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        editCalls++;
+        return 'plat';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    expect(editCalls).toBe(0);
+
+    // edit-doomed should now be in delivered (as failed), not pending retries.
+    const inDb = openInboundDb('ag-1', session.id);
+    const delivered = getDeliveredIds(inDb);
+    inDb.close();
+    expect(delivered.has('edit-doomed')).toBe(true);
+
+    // Second drain is a no-op — confirms it's not re-attempted.
+    await deliverSessionMessages(session);
+    expect(editCalls).toBe(0);
+  });
 });
 
 describe('deliverSessionMessages — permission check', () => {
