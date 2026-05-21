@@ -244,24 +244,24 @@ export function writeSessionMessage(
       sourceSessionId: message.sourceSessionId ?? null,
       onWake: message.onWake ?? 0,
     }));
+    // Emit immediately after the insert succeeds — before updateSession or any
+    // other call that could throw. Absence of this line for a given routed
+    // message must reliably prove the insert never ran.
+    log.debug('Session message persisted', {
+      sessionId,
+      agentGroupId,
+      messageId: message.id,
+      seq,
+      kind: message.kind,
+      trigger: message.trigger ?? 1,
+      onWake: message.onWake ?? 0,
+      path: dbPath,
+    });
   } finally {
     db.close();
   }
 
   updateSession(sessionId, { last_active: new Date().toISOString() });
-
-  // Permanent audit trail: every persisted inbound row, with seq + path,
-  // so a "log says yes, DB says no" mystery is solvable from logs alone.
-  log.debug('Session message persisted', {
-    sessionId,
-    agentGroupId,
-    messageId: message.id,
-    seq,
-    kind: message.kind,
-    trigger: message.trigger ?? 1,
-    onWake: message.onWake ?? 0,
-    path: dbPath,
-  });
 
   return { id: message.id, seq };
 }
