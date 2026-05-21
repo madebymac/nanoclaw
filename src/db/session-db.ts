@@ -120,7 +120,8 @@ export function insertMessage(
      */
     onWake?: 0 | 1;
   },
-): void {
+): { seq: number } {
+  const seq = nextEvenSeq(db);
   db.prepare(
     `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
      VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId, @onWake)`,
@@ -129,8 +130,9 @@ export function insertMessage(
     trigger: message.trigger ?? 1,
     onWake: message.onWake ?? 0,
     sourceSessionId: message.sourceSessionId ?? null,
-    seq: nextEvenSeq(db),
+    seq,
   });
+  return { seq };
 }
 
 export function countDueMessages(db: Database.Database): number {

@@ -447,7 +447,7 @@ async function deliverToAgent(
     }
   }
 
-  writeSessionMessage(session.agent_group_id, session.id, {
+  const { id: messageId, seq } = writeSessionMessage(session.agent_group_id, session.id, {
     id: messageIdForAgent(event.message.id, agent.agent_group_id),
     kind: event.message.kind,
     timestamp: event.message.timestamp,
@@ -463,6 +463,8 @@ async function deliverToAgent(
     agentGroup: agent.agent_group_id,
     engage_mode: agent.engage_mode,
     kind: event.message.kind,
+    messageId,
+    seq,
     userId,
     wake,
     created,
