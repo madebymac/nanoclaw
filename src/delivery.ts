@@ -264,9 +264,7 @@ async function drainSession(session: Session): Promise<void> {
  * delivered last tick is already on the platform; if a new one arrives this
  * tick, it goes through the normal path and overwrites the platform message.
  */
-function findSupersededStreamEdits(
-  undelivered: Array<{ id: string; content: string }>,
-): Set<string> {
+function findSupersededStreamEdits(undelivered: Array<{ id: string; content: string }>): Set<string> {
   // Map: targetMessageOutId → id of the most recently seen stream_edit row.
   // Queue is already ordered by timestamp ASC, so the last write wins.
   const newestPerTarget = new Map<string, string>();
@@ -328,9 +326,7 @@ async function deliverMessage(
     }
     const platformMessageId = getDeliveredPlatformId(inDb, target);
     if (!platformMessageId) {
-      throw new Error(
-        `stream_edit target ${target} not yet delivered (message ${msg.id}) — will retry`,
-      );
+      throw new Error(`stream_edit target ${target} not yet delivered (message ${msg.id}) — will retry`);
     }
     content = {
       operation: 'edit',
