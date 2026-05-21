@@ -7,15 +7,17 @@ row at the end of the turn.
 
 ## Status
 
-This is being delivered in stages. Stages 1 and 2a are shipped; 2a is dead
-code (the host recognises `stream_edit` rows) until 2b adds the container-
-side writer that emits them.
+This is being delivered in stages. Stages 1, 2a, and 2b are shipped — with
+`NANOCLAW_STREAM_REPLIES=1` on the host environment, the full mid-block
+streaming path is active end to end against any adapter that supports
+edit-on-existing-message. Stage 3 adds per-channel rate limit overrides
+and an explicit fallback for adapters that don't.
 
 | Stage | What | Status |
 |-------|------|--------|
 | 1 | Provider `partial` event; early-dispatch of *closed* `<message>` blocks before the `result` event arrives | shipped |
-| 2a | Host-side `stream_edit` recognition: resolve `targetMessageOutId` via `delivered` table → `edit` op; coalesce superseded edits | shipped (dead code until 2b) |
-| 2b | Container writer: per-destination throttled `stream_edit` flushes while the trailing `<message>` block is still open | designed, not implemented |
+| 2a | Host-side `stream_edit` recognition: resolve `targetMessageOutId` via `delivered` table → `edit` op; coalesce superseded edits | shipped |
+| 2b | Container writer: per-destination throttled `stream_edit` flushes while the trailing `<message>` block is still open | shipped |
 | 3 | Per-channel rate limiting (Telegram = 1 edit/sec/chat); adapter `supportsEdits` flag and fallback for adapters without edit support | designed, not implemented |
 
 ## Stage 1 — closed-block early dispatch
@@ -109,24 +111,48 @@ the adapter — the earlier ones are marked delivered without a send. Every
 edit is a full replacement, so superseded ones would just waste budget
 against the per-chat rate limit.
 
-Nothing writes `stream_edit` rows yet — Stage 2b adds the container-side
-writer.
+Stage 2b emits these rows from the container.
 
-## Stage 2b — container writer (design)
+## Stage 2b — container writer (shipped)
 
-**Container**
+`container/agent-runner/src/stream-dispatch.ts` exposes `detectOpenBlock`
+alongside the Stage 1 closed-block extractor. `poll-loop.ts` uses it on
+every `partial` event to drive a per-turn `StreamingBlockState`:
 
-Per active destination (keyed by `channel_type|platform_id|thread_id`):
+1. **First closed block in a turn** → ordinary send via the Stage 1 path.
+   No change.
+2. **First `partial` with content in the trailing open block** →
+   `advanceStreamingBlock` does an ordinary `writeMessageOut`, captures
+   the row's `messages_out.id`, and stores it as the streaming target.
+3. **Subsequent `partial`s while the same block stays open** →
+   `flushStreamEdit` writes a `stream_edit` row referencing that target,
+   gated by:
+   - **Throttle** — minimum 1500ms between flushes per block
+     (`STREAM_EDIT_MIN_INTERVAL_MS` — picked for Telegram's 1 edit/sec/chat
+     limit; Stage 3 makes this per-channel).
+   - **Text-equality skip** — no-op when the body hasn't changed since
+     the last flush.
+4. **Block closes** → one final, throttle-bypassing flush with the closed
+   body, then `streamingBlock` resets. The block's index is added to
+   `earlyDispatched` so `dispatchResultText` skips it on the `result`
+   pass (no duplicate send).
+5. **`init` mid-stream** (e.g. PreCompact) or **`result`** → state
+   cleared. Any in-flight initial send is already on the user's screen
+   and stays there; no further edits.
 
-1. First closed block in a streaming turn → ordinary send (no change).
-2. While the trailing block is *open*, on each `partial` event:
-   - Throttle to a minimum interval per destination (default 1500ms; per-
-     channel override in container config to respect e.g. Telegram's
-     1-edit/sec/chat limit).
-   - Write a `stream_edit` row targeting the most recent open block's
-     `messages_out.id`, with the latest accumulated text.
-3. Block closes → flush one final `stream_edit` with the closed text, then
-   reset the per-destination state for the next block.
+**What's *not* sent mid-block:**
+
+- Empty openings (`<message to="user">` with no body yet). Editing an
+  empty message is wasted work and a UX flicker.
+- Blocks whose destination doesn't resolve — `findByName` miss bails
+  out without an initial send. The result-event path's
+  scratchpad-log / unwrapped-output nudge still fires.
+
+**What happens if the host can't keep up:** the throttle just caps the
+*write* rate; if delivery is slower (e.g. a tight rate limiter on the
+channel), multiple `stream_edit` rows for the same target queue up and
+the Stage 2a coalescer in `src/delivery.ts` drops all but the newest in
+a single drain pass.
 
 **Host** (Stage 3 — not yet implemented)
 
@@ -148,9 +174,11 @@ sentinel status (`skipped_no_edit_support`) for observability.
 
 ## Testing
 
-Stage 1 has unit tests for the extractor at
+Stage 1 has unit tests for the closed-block extractor and Stage 2b has
+unit tests for `detectOpenBlock`, both at
 `container/agent-runner/src/stream-dispatch.test.ts`. Stage 2a has host
 delivery tests at `src/delivery.test.ts` covering resolve, retry-then-
-succeed once the target lands, and coalescing of superseded edits. End-to-
-end testing requires `NANOCLAW_STREAM_REPLIES=1` plus the container writer
-(Stage 2b) plus a channel adapter, which lives on the `channels` branch.
+succeed once the target lands, coalescing of superseded edits, and
+fail-fast on a permanently-failed target. End-to-end testing requires
+`NANOCLAW_STREAM_REPLIES=1` plus a channel adapter, which lives on the
+`channels` branch — verify there before relying on the behavior.

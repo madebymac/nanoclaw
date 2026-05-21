@@ -22,7 +22,21 @@ export interface ExtractedBlock {
   body: string;
 }
 
+export interface OpenBlock {
+  /**
+   * Index of this open block within the accumulated text. Equals the number
+   * of already-closed blocks before it (closed blocks always precede the
+   * trailing open block).
+   */
+  index: number;
+  to: string;
+  /** Current partial body, *not* trimmed — character count drives throttle decisions. */
+  body: string;
+}
+
 const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
+const OPEN_BLOCK_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*)$/;
+const CLOSE_TAG = '</message>';
 
 /**
  * Stateful extractor that tracks how many complete <message> blocks have
@@ -59,4 +73,23 @@ export function createStreamExtractor(): {
       return alreadyReturned;
     },
   };
+}
+
+/**
+ * Find the trailing unclosed `<message to="…">` block, if any. Stage 2b uses
+ * this to drive mid-block streaming: the body is the partial text we want to
+ * mirror to the user via `stream_edit`. Returns null when the tail is plain
+ * scratchpad, an unwrapped fragment, or sits between two closed blocks.
+ *
+ * `closedCount` is the index the trailing block would take once it closes —
+ * pass `streamExtractor.count()` after running `extractNewlyClosed` so the
+ * returned `index` lines up with what `dispatchResultText` and the
+ * early-dispatched set use.
+ */
+export function detectOpenBlock(text: string, closedCount: number): OpenBlock | null {
+  const lastClose = text.lastIndexOf(CLOSE_TAG);
+  const tail = lastClose >= 0 ? text.slice(lastClose + CLOSE_TAG.length) : text;
+  const m = OPEN_BLOCK_RE.exec(tail);
+  if (!m) return null;
+  return { index: closedCount, to: m[1], body: m[2] };
 }
