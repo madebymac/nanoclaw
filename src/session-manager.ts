@@ -222,13 +222,15 @@ export function writeSessionMessage(
      */
     onWake?: 0 | 1;
   },
-): void {
+): { id: string; seq: number } {
   // Extract base64 attachment data, save to inbox, replace with file paths
   const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
 
+  const dbPath = inboundDbPath(agentGroupId, sessionId);
   const db = openInboundDb(agentGroupId, sessionId);
+  let seq: number;
   try {
-    insertMessage(db, {
+    ({ seq } = insertMessage(db, {
       id: message.id,
       kind: message.kind,
       timestamp: message.timestamp,
@@ -241,12 +243,27 @@ export function writeSessionMessage(
       trigger: message.trigger ?? 1,
       sourceSessionId: message.sourceSessionId ?? null,
       onWake: message.onWake ?? 0,
+    }));
+    // Emit immediately after the insert succeeds — before updateSession or any
+    // other call that could throw. Absence of this line for a given routed
+    // message must reliably prove the insert never ran.
+    log.debug('Session message persisted', {
+      sessionId,
+      agentGroupId,
+      messageId: message.id,
+      seq,
+      kind: message.kind,
+      trigger: message.trigger ?? 1,
+      onWake: message.onWake ?? 0,
+      path: dbPath,
     });
   } finally {
     db.close();
   }
 
   updateSession(sessionId, { last_active: new Date().toISOString() });
+
+  return { id: message.id, seq };
 }
 
 /**

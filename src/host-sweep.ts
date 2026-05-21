@@ -231,14 +231,24 @@ function enforceRunningContainerSla(
   session: Session,
   agentGroupId: string,
 ): void {
+  const heartbeatMs = heartbeatMtimeMs(agentGroupId, session.id);
   const decision = decideStuckAction({
     now: Date.now(),
-    heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
+    heartbeatMtimeMs: heartbeatMs,
     containerState: getContainerState(outDb),
     claims: getProcessingClaims(outDb),
   });
 
-  if (decision.action === 'ok') return;
+  if (decision.action === 'ok') {
+    // Symmetric audit log for the "container healthy" branch — lets us
+    // distinguish "sweep saw container and decided not to kill" from
+    // "sweep never ran" when diagnosing missing kills or stuck sessions.
+    log.debug('Container healthy', {
+      sessionId: session.id,
+      heartbeatAgeMs: heartbeatMs === 0 ? null : Date.now() - heartbeatMs,
+    });
+    return;
+  }
 
   if (decision.action === 'kill-ceiling') {
     log.warn('Killing container past absolute ceiling', {
