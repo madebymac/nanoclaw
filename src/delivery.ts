@@ -380,9 +380,7 @@ async function deliverMessage(
   if (content.operation === 'stream_edit' && typeof content.targetMessageOutId === 'string') {
     const row = inDb
       .prepare('SELECT status, platform_message_id FROM delivered WHERE message_out_id = ?')
-      .get(content.targetMessageOutId) as
-      | { status: string; platform_message_id: string | null }
-      | undefined;
+      .get(content.targetMessageOutId) as { status: string; platform_message_id: string | null } | undefined;
     if (!row) {
       throw new DeferredDeliveryError(`target ${content.targetMessageOutId} not yet delivered`);
     }
