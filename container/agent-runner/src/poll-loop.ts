@@ -14,9 +14,19 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
-import { createStreamExtractor, type ExtractedBlock } from './stream-dispatch.js';
+import { createStreamExtractor, detectOpenBlock, type ExtractedBlock, type OpenBlock } from './stream-dispatch.js';
 
 const STREAM_REPLIES = process.env.NANOCLAW_STREAM_REPLIES === '1';
+
+/**
+ * Throttle for `stream_edit` flushes while a `<message>` block is still open.
+ * 1500ms gives a comfortable margin over Telegram's 1-edit/sec/chat limit
+ * (Stage 3 will introduce per-channel overrides). Reducing this won't make
+ * the first chunk arrive any sooner — the initial send happens on the very
+ * first `partial` with content — but it controls how frequently the
+ * delivered message visibly grows.
+ */
+const STREAM_EDIT_MIN_INTERVAL_MS = 1500;
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -291,6 +301,11 @@ async function processQuery(
   // Reset on each `init` (e.g. PreCompact starts a fresh turn).
   let streamExtractor = STREAM_REPLIES ? createStreamExtractor() : null;
   let earlyDispatched: Set<number> = new Set();
+  // Mid-block streaming (Stage 2b). Tracks the trailing open <message>
+  // block we've already done an initial send for, so subsequent partials
+  // can target its messages_out.id with `stream_edit` rows. Cleared when
+  // the block closes (final stream_edit emitted there) or on init.
+  let streamingBlock: StreamingBlockState | null = null;
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -376,15 +391,34 @@ async function processQuery(
       if (event.type === 'partial' && streamExtractor) {
         const newlyClosed = streamExtractor.extractNewlyClosed(event.text);
         for (const block of newlyClosed) {
+          // If this is the close of the block we've been mid-block-streaming,
+          // emit a final stream_edit with the closed body and clear state —
+          // do NOT re-dispatch via sendToDestination (the initial send +
+          // edits already targeted the same platform message).
+          if (streamingBlock && streamingBlock.index === block.index) {
+            flushStreamEdit(streamingBlock, block.body, true);
+            earlyDispatched.add(block.index);
+            streamingBlock = null;
+            continue;
+          }
           if (dispatchBlock(block, routing)) earlyDispatched.add(block.index);
+        }
+        // Now look at the trailing open block. Initial send on first sight;
+        // throttled stream_edit on subsequent sights.
+        const open = detectOpenBlock(event.text, streamExtractor.count());
+        if (open) {
+          streamingBlock = advanceStreamingBlock(streamingBlock, open, routing);
         }
       } else if (event.type === 'init') {
         queryContinuation = event.continuation;
         // Fresh turn — drop any streaming state from a prior segment
-        // (e.g. PreCompact emits a new init mid-stream).
+        // (e.g. PreCompact emits a new init mid-stream). Any in-flight
+        // mid-block stream is also abandoned; its initial send is still
+        // on the user's screen but won't see further edits.
         if (STREAM_REPLIES) {
           streamExtractor = createStreamExtractor();
           earlyDispatched = new Set();
+          streamingBlock = null;
         }
         // Persist immediately so a mid-turn container crash still lets the
         // next wake resume the conversation. Without this, the session id
@@ -408,6 +442,7 @@ async function processQuery(
           // explicit reset keeps state contained to the turn that produced it).
           earlyDispatched = new Set();
           if (streamExtractor) streamExtractor = createStreamExtractor();
+          streamingBlock = null;
           if (hasUnwrapped && !unwrappedNudged) {
             unwrappedNudged = true;
             const destinations = getAllDestinations();
@@ -526,6 +561,118 @@ function dispatchBlock(block: ExtractedBlock, routing: RoutingContext): boolean 
   sendToDestination(dest, block.body, routing);
   log(`Stream-dispatched <message to="${block.to}"> (${block.body.length} chars)`);
   return true;
+}
+
+/**
+ * Per-turn state for the currently open `<message>` block being mid-block
+ * streamed. We hold onto the initial messages_out.id so subsequent
+ * stream_edit rows can resolve back to the same delivered platform
+ * message via the host's `delivered` table.
+ */
+interface StreamingBlockState {
+  index: number;
+  to: string;
+  /** id of the initial messages_out row whose platform message will be edited. */
+  messageOutId: string;
+  /** Routing fields stamped on the initial row; reused on every edit. */
+  platformId: string;
+  channelType: string;
+  threadId: string | null;
+  inReplyTo: string | null;
+  lastFlushedText: string;
+  lastFlushAt: number;
+}
+
+/**
+ * Handle one `partial`-tick observation of the trailing open block.
+ *
+ * - If we haven't seen this block yet (or it's a fresh index after a closed
+ *   block flipped over), do an ordinary `writeMessageOut` so the user sees
+ *   text immediately. Return the new state.
+ * - If it's the same block we've been streaming, emit a throttled
+ *   `stream_edit` row targeting the original messages_out.id and update
+ *   the state. Return the (possibly updated) state.
+ * - Unknown destination: skip silently — the result-event path will
+ *   scratchpad-log the unwrapped output. Return the prior state unchanged
+ *   so we don't keep re-attempting.
+ */
+function advanceStreamingBlock(
+  prior: StreamingBlockState | null,
+  open: OpenBlock,
+  routing: RoutingContext,
+): StreamingBlockState | null {
+  if (prior && prior.index === open.index) {
+    flushStreamEdit(prior, open.body, false);
+    return prior;
+  }
+  // New (or first) open block — initial send. Skip empty-body openings;
+  // editing an empty message is wasted work and a UX flicker.
+  if (open.body.trim().length === 0) return prior;
+  const dest = findByName(open.to);
+  if (!dest) {
+    // Don't repeatedly try to send — bail and let the result-event path
+    // scratchpad-log the unwrapped/unknown-destination text.
+    return prior;
+  }
+  const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+  const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  const destRouting = resolveDestinationThread(channelType, platformId);
+  const messageOutId = generateId();
+  writeMessageOut({
+    id: messageOutId,
+    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+    kind: 'chat',
+    platform_id: platformId,
+    channel_type: channelType,
+    thread_id: destRouting?.threadId ?? null,
+    content: JSON.stringify({ text: open.body }),
+  });
+  log(`Stream-initial <message to="${open.to}"> (${open.body.length} chars), id=${messageOutId}`);
+  return {
+    index: open.index,
+    to: open.to,
+    messageOutId,
+    platformId,
+    channelType,
+    threadId: destRouting?.threadId ?? null,
+    inReplyTo: destRouting?.inReplyTo ?? routing.inReplyTo,
+    lastFlushedText: open.body,
+    lastFlushAt: Date.now(),
+  };
+}
+
+/**
+ * Write a `stream_edit` row pointing at `state.messageOutId`. When
+ * `force` is false (the partial-tick path) the throttle window and a
+ * pure-text-equality check both have to pass; the host coalesces any
+ * superseded rows that slip through, so the throttle just keeps the
+ * outbound queue from growing faster than the delivery loop drains it.
+ */
+function flushStreamEdit(state: StreamingBlockState, body: string, force: boolean): void {
+  const now = Date.now();
+  if (!force) {
+    if (body === state.lastFlushedText) return;
+    if (now - state.lastFlushAt < STREAM_EDIT_MIN_INTERVAL_MS) return;
+  } else if (body === state.lastFlushedText) {
+    // Even on close, skip a no-op edit (block closed at the exact text we
+    // last flushed). Saves one delivery round-trip.
+    return;
+  }
+  writeMessageOut({
+    id: generateId(),
+    in_reply_to: state.inReplyTo,
+    kind: 'chat',
+    platform_id: state.platformId,
+    channel_type: state.channelType,
+    thread_id: state.threadId,
+    content: JSON.stringify({
+      operation: 'stream_edit',
+      targetMessageOutId: state.messageOutId,
+      text: body,
+    }),
+  });
+  state.lastFlushedText = body;
+  state.lastFlushAt = now;
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
