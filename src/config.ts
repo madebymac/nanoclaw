@@ -39,12 +39,13 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESS
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
 
-// Self-upgrade: optional periodic poll for upstream commits on the current
-// branch's tracking remote. When the local checkout is strictly behind
-// upstream and fast-forwardable, the host shells out to `make deploy` via
+// Self-upgrade: periodic poll for upstream commits on the current branch's
+// tracking remote. When the local checkout is strictly behind upstream and
+// fast-forwardable, the host shells out to `make deploy` via
 // `systemd-run --user --no-block` so the deploy survives the parent's restart.
-// Linux-only (Makefile uses `systemctl --user`). Off by default.
-export const SELF_UPGRADE_ENABLED = process.env.NANOCLAW_SELF_UPGRADE_ENABLED === 'true';
+// Linux-only (Makefile uses `systemctl --user`). On by default; set
+// `NANOCLAW_SELF_UPGRADE_ENABLED=false` to disable.
+export const SELF_UPGRADE_ENABLED = (process.env.NANOCLAW_SELF_UPGRADE_ENABLED || 'true') !== 'false';
 export const SELF_UPGRADE_INTERVAL_MS = Math.max(
   60_000,
   parseInt(process.env.NANOCLAW_SELF_UPGRADE_INTERVAL_MS || '600000', 10) || 600_000,

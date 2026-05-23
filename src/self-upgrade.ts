@@ -15,7 +15,7 @@
  *     HEAD, diverged history)
  *   - no upstream tracking branch
  *
- * Off by default. Set `NANOCLAW_SELF_UPGRADE_ENABLED=true` to enable.
+ * On by default. Set `NANOCLAW_SELF_UPGRADE_ENABLED=false` to disable.
  * Linux-only — the Makefile's deploy target uses `systemctl --user restart`.
  */
 import { spawn } from 'child_process';
@@ -56,7 +56,7 @@ let inFlight = false;
 
 export function startSelfUpgrade(projectRoot: string = process.cwd()): void {
   if (!SELF_UPGRADE_ENABLED) {
-    log.info('Self-upgrade disabled (set NANOCLAW_SELF_UPGRADE_ENABLED=true to enable)');
+    log.info('Self-upgrade disabled (NANOCLAW_SELF_UPGRADE_ENABLED=false)');
     return;
   }
   if (process.platform !== 'linux') {
