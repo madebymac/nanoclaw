@@ -19,10 +19,10 @@ A scheduled agent that automatically reviews open pull requests using Claude Opu
 - Set Callback URL to your NanoClaw dashboard: `http://localhost:10254/v1/apps/github/callback`
 - Check **"Request user authorization (OAuth) during installation"**
 - Set Repository permissions:
-  - **Contents**: Read and write
+  - **Contents**: Read
   - **Pull requests**: Read and write
   - **Metadata**: Read (required)
-- Install the app on your target repos
+- Install the app on your target repos and accept the permissions at github.com/settings/installations
 
 ### 2. Connect the app in NanoClaw
 
@@ -30,11 +30,13 @@ A scheduled agent that automatically reviews open pull requests using Claude Opu
 - Enter your App ID and slug, upload the private key
 - Complete the OAuth flow
 
-### 3. Configure the poll script
+### 3. Configure the files
 
-Edit `poll-script.js`:
+In **both** `poll-script.js` and `agent-prompt.md`:
+- Set `botLogin` / `BOT_LOGIN` to your GitHub App's bot identity (e.g. `my-review-bot[bot]`)
+
+In `poll-script.js`:
 - Set `repos` to the list of repos to watch
-- Set `botLogin` to match your GitHub App's bot identity (e.g. `my-review-bot[bot]`)
 
 ### 4. Schedule the task
 
