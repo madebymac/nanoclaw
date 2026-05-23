@@ -5,26 +5,43 @@
  *
  * Slug is sha1(projectRoot)[:8] — deterministic per checkout path, stable
  * across re-runs, unique enough across installs.
+ *
+ * Multi-instance: when `NCL_INSTANCE` is set, the slug used for unit names,
+ * service labels, and the container-install label mixes the instance name
+ * into the hash so two instances running from the same checkout produce
+ * distinct systemd units, plists, and orphan-sweep label scopes. The
+ * container image base is intentionally NOT instance-scoped — both
+ * instances run the same built image, so they share a tag and a build.
  */
 import { createHash } from 'crypto';
 
-export function getInstallSlug(projectRoot: string = process.cwd()): string {
-  return createHash('sha1').update(projectRoot).digest('hex').slice(0, 8);
+function resolveInstance(instance?: string): string {
+  if (instance !== undefined) return instance;
+  return (process.env.NCL_INSTANCE || '').trim();
+}
+
+export function getInstallSlug(projectRoot: string = process.cwd(), instance?: string): string {
+  const inst = resolveInstance(instance);
+  const input = inst ? `${projectRoot}:${inst}` : projectRoot;
+  return createHash('sha1').update(input).digest('hex').slice(0, 8);
 }
 
 /** launchd Label + plist basename. e.g. `com.nanoclaw-v2-ab12cd34`. */
-export function getLaunchdLabel(projectRoot?: string): string {
-  return `com.nanoclaw-v2-${getInstallSlug(projectRoot)}`;
+export function getLaunchdLabel(projectRoot?: string, instance?: string): string {
+  return `com.nanoclaw-v2-${getInstallSlug(projectRoot, instance)}`;
 }
 
 /** systemd unit name (no .service suffix). e.g. `nanoclaw-v2-ab12cd34`. */
-export function getSystemdUnit(projectRoot?: string): string {
-  return `nanoclaw-v2-${getInstallSlug(projectRoot)}`;
+export function getSystemdUnit(projectRoot?: string, instance?: string): string {
+  return `nanoclaw-v2-${getInstallSlug(projectRoot, instance)}`;
 }
 
-/** Docker image base (no tag). e.g. `nanoclaw-agent-v2-ab12cd34`. */
+/**
+ * Docker image base (no tag). e.g. `nanoclaw-agent-v2-ab12cd34`.
+ * Per-checkout only — instances on the same checkout share one image.
+ */
 export function getContainerImageBase(projectRoot?: string): string {
-  return `nanoclaw-agent-v2-${getInstallSlug(projectRoot)}`;
+  return `nanoclaw-agent-v2-${getInstallSlug(projectRoot, '')}`;
 }
 
 /** Default full container image reference with `:latest` tag. */
