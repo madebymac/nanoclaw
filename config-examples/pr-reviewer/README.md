@@ -52,7 +52,7 @@ Script: [contents of poll-script.js]
 Prompt: [contents of agent-prompt.md, with {PR_LIST} as a placeholder]
 ```
 
-The agent will substitute the live PR list from the script output into `{PR_LIST}` before passing the prompt to the reviewer sub-agent.
+When the task fires, the agent reads the PR list from the script output and substitutes it into `{PR_LIST}` in the prompt before forwarding to the reviewer sub-agent. This substitution is done by the agent itself — `{PR_LIST}` is not a framework template variable.
 
 ## Files
 
