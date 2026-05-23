@@ -15,12 +15,11 @@
  *     HEAD, diverged history)
  *   - no upstream tracking branch
  *
- * On by default. Set `NANOCLAW_SELF_UPGRADE_ENABLED=false` to disable.
  * Linux-only — the Makefile's deploy target uses `systemctl --user restart`.
  */
 import { spawn } from 'child_process';
 
-import { SELF_UPGRADE_ENABLED, SELF_UPGRADE_INTERVAL_MS, SELF_UPGRADE_REMOTE } from './config.js';
+import { SELF_UPGRADE_INTERVAL_MS, SELF_UPGRADE_REMOTE } from './config.js';
 import { getSystemdUnit } from './install-slug.js';
 import { log } from './log.js';
 
@@ -55,10 +54,6 @@ let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
 
 export function startSelfUpgrade(projectRoot: string = process.cwd()): void {
-  if (!SELF_UPGRADE_ENABLED) {
-    log.info('Self-upgrade disabled (NANOCLAW_SELF_UPGRADE_ENABLED=false)');
-    return;
-  }
   if (process.platform !== 'linux') {
     log.warn('Self-upgrade only supported on Linux (uses systemd-run) — not starting', {
       platform: process.platform,
