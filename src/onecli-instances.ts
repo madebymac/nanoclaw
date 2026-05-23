@@ -10,7 +10,11 @@
  *   `ONECLI_URL` + `ONECLI_API_KEY` — that's the back-compat path for installs
  *   that predate multi-instance support.
  *
- * Clients are memoized per-instance so we don't churn approval long-polls etc.
+ * Clients are memoized on a `(url, apiKey)` tuple — not on instance id — so
+ * that `updateOneCLIInstance(id, { api_key: ... })` (credential rotation) is
+ * picked up by the next call without requiring callers to remember to
+ * invalidate. The old client is dropped on the floor; the SDK has no
+ * persistent connections so this is a no-op leak.
  */
 import { OneCLI } from '@onecli-sh/sdk';
 
@@ -19,25 +23,30 @@ import { getAgentGroup } from './db/agent-groups.js';
 import { getOneCLIInstance } from './db/onecli-instances.js';
 import type { AgentGroup, OneCLIInstance } from './types.js';
 
-const SINGLETON_KEY = '__singleton__';
 const clients = new Map<string, OneCLI>();
 
+function cacheKey(url: string | undefined, apiKey: string | undefined): string {
+  return `${url ?? ''}::${apiKey ?? ''}`;
+}
+
 function clientForInstance(instance: OneCLIInstance): OneCLI {
-  const existing = clients.get(instance.id);
+  const key = cacheKey(instance.api_url, instance.api_key ?? undefined);
+  const existing = clients.get(key);
   if (existing) return existing;
   const client = new OneCLI({
     url: instance.api_url,
     apiKey: instance.api_key ?? undefined,
   });
-  clients.set(instance.id, client);
+  clients.set(key, client);
   return client;
 }
 
 function singletonClient(): OneCLI {
-  const existing = clients.get(SINGLETON_KEY);
+  const key = cacheKey(ONECLI_URL, ONECLI_API_KEY);
+  const existing = clients.get(key);
   if (existing) return existing;
   const client = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
-  clients.set(SINGLETON_KEY, client);
+  clients.set(key, client);
   return client;
 }
 

@@ -79,7 +79,7 @@ registerResource({
     remove: {
       access: 'approval',
       description:
-        'Tear down a OneCLI instance. Refuses if any agent groups still reference it — detach them first via `ncl groups update --id <group> --onecli-instance-id ""`. Use --id <slug>.',
+        'Tear down a OneCLI instance. Refuses if any agent groups still reference it — detach them first via `ncl groups update --id <group> --onecli-instance-id ""`. Phase 1 only drops the DB row; requires --force until compose teardown lands so operators don\'t silently orphan running containers + bound ports.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -91,12 +91,20 @@ registerResource({
             `Refusing to remove instance ${id} — ${bound} agent group(s) still reference it. Detach them first.`,
           );
         }
-        // Compose teardown lands with the install wrapper. For now we only drop
-        // the row; if compose containers exist, they must be torn down manually.
+        // Until the install wrapper ships compose teardown alongside, `remove`
+        // would silently orphan the running containers + leave the host ports
+        // bound while the DB forgets about them — a future `install` could
+        // reallocate the same triple and collide. Gate behind --force so the
+        // operator confirms they know they're cleaning up containers by hand.
+        if (!args.force) {
+          throw new Error(
+            `Refusing to remove instance ${id} — compose teardown is not implemented yet. Re-run with --force to drop the DB row only (you must then docker-compose down the orphaned containers manually).`,
+          );
+        }
         deleteOneCLIInstance(id);
         return {
           removed: id,
-          note: 'DB row deleted. Compose teardown not yet implemented — see multi-onecli-spikes.md.',
+          note: 'DB row deleted. Compose containers (if any) must be torn down manually — see multi-onecli-spikes.md.',
         };
       },
     },

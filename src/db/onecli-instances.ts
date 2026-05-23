@@ -1,3 +1,5 @@
+import net from 'net';
+
 import type { OneCLIInstance } from '../types.js';
 import { getDb } from './connection.js';
 
@@ -55,8 +57,29 @@ export function countAgentGroupsForInstance(instanceId: string): number {
   return row.n;
 }
 
-/** Smallest free triple of ports starting at the given base. Steps in 10s. */
-export function allocatePortTriple(basePort = 10256): { app: number; gateway: number; postgres: number } {
+/** Probe whether a TCP port on 127.0.0.1 is bindable right now. */
+async function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.once('listening', () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+/**
+ * Smallest free triple of ports starting at the given base. Steps in 10s.
+ *
+ * Checks two layers: the DB (other OneCLI instances we know about) AND the
+ * host kernel (other processes — predating-OneCLI installs, unrelated
+ * services). Without the kernel probe, `docker compose up` would later fail
+ * in a confusing way against a port already bound on the host.
+ */
+export async function allocatePortTriple(
+  basePort = 10256,
+): Promise<{ app: number; gateway: number; postgres: number }> {
   const used = getDb().prepare('SELECT app_port, gateway_port, postgres_port FROM onecli_instances').all() as {
     app_port: number;
     gateway_port: number;
@@ -72,9 +95,9 @@ export function allocatePortTriple(basePort = 10256): { app: number; gateway: nu
     const app = base;
     const gateway = base + 1;
     const postgres = base + 2;
-    if (!taken.has(app) && !taken.has(gateway) && !taken.has(postgres)) {
-      return { app, gateway, postgres };
-    }
+    if (taken.has(app) || taken.has(gateway) || taken.has(postgres)) continue;
+    if (!(await isPortFree(app)) || !(await isPortFree(gateway)) || !(await isPortFree(postgres))) continue;
+    return { app, gateway, postgres };
   }
   throw new Error('Could not allocate a free OneCLI port triple');
 }

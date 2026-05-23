@@ -175,7 +175,14 @@ function genericUpdate(def: ResourceDef) {
         if (col.enum && !col.enum.includes(String(v))) {
           throw new Error(`${col.name} must be one of: ${col.enum.join(', ')}`);
         }
-        updates[col.name] = col.type === 'number' ? Number(v) : v;
+        // Treat empty string as NULL for nullable (non-required) string columns
+        // so that `--foo ""` matches the documented detach semantics rather
+        // than writing the empty string and breaking future `IS NULL` reads.
+        if (v === '' && col.type === 'string' && !col.required) {
+          updates[col.name] = null;
+        } else {
+          updates[col.name] = col.type === 'number' ? Number(v) : v;
+        }
       }
     }
     if (Object.keys(updates).length === 0) {
