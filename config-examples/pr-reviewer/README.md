@@ -5,9 +5,10 @@ A scheduled agent that automatically reviews open pull requests using Claude Opu
 ## What it does
 
 - Polls configured repos for open PRs
+- Skips draft PRs and PRs authored by the bot itself
 - Skips any PR where the bot has already reviewed the current head commit
 - Re-reviews PRs where new commits have been pushed since the last bot review
-- Posts a full code review (APPROVE or REQUEST_CHANGES) with inline comments
+- Posts a full code review (APPROVE, REQUEST_CHANGES, or COMMENT for bot-authored PRs) with inline comments
 - Notifies you on start and finish of each review batch
 
 ## Setup
@@ -16,7 +17,7 @@ A scheduled agent that automatically reviews open pull requests using Claude Opu
 
 - Go to **github.com/settings/apps/new**
 - Name it (e.g. `my-review-bot` → appears as `my-review-bot[bot]`)
-- Set Callback URL to your NanoClaw dashboard: `http://localhost:10254/v1/apps/github/callback`
+- Set Callback URL to your NanoClaw dashboard's GitHub callback — e.g. `http://localhost:10254/v1/apps/github/callback` for local development, or `https://your-host/v1/apps/github/callback` when running remotely
 - Check **"Request user authorization (OAuth) during installation"**
 - Set Repository permissions:
   - **Contents**: Read
@@ -37,7 +38,9 @@ In `poll-script.js`:
 - Set `repos` to the list of repos to watch
 
 In `agent-prompt.md`:
-- Replace `my-review-bot[bot]` with your GitHub App's bot identity
+- Replace every occurrence of `my-review-bot[bot]` with your GitHub App's bot identity
+
+> **Important:** these two values must stay in sync. If they diverge, the reviewer won't recognise its own past reviews and will re-review the same PR on every poll cycle.
 
 ### 4. Schedule the task
 
