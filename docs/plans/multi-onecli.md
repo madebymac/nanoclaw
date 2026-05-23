@@ -79,7 +79,7 @@ ALTER TABLE agent_groups ADD COLUMN onecli_instance_id TEXT
 -- documentation and for future migration to a stricter DB.
 ```
 
-Migration is additive and idempotent; matches the pattern in `src/db/migrations/module-approvals-pending-approvals.ts`.
+Migration is additive. **It is registration-idempotent, not statement-idempotent** — `ALTER TABLE ... ADD COLUMN ...` errors if run twice on SQLite (which has no `ADD COLUMN IF NOT EXISTS`), and the `CREATE TABLE IF NOT EXISTS` clause only covers the new table. Re-run safety comes from nanoclaw's migration runner: it records each successfully-applied migration in `schema_version` (or equivalent) and skips already-applied migrations on startup. This matches the pattern in `src/db/migrations/module-approvals-pending-approvals.ts` and every numbered migration in `src/db/migrations/`. Do **not** wrap the SQL in `try/catch`-on-error or in a `PRAGMA table_info`-gated conditional unless you specifically want it to be statement-idempotent (no current migration is).
 
 **Back-compat behavior:** existing installs have one OneCLI from the original `setup/onecli.ts` flow. The migration leaves `onecli_instance_id` NULL on all existing agent groups; `getOneCLIForAgent` returns the legacy env-var singleton when the column is NULL. No data migration required, no behavior change for existing installs.
 
@@ -148,14 +148,25 @@ Internals:
 
 Standard `ncl` resource definition. Verbs: `list`, `get`, `install`, `remove`, `status`, `repair`.
 
+**CLI convention for nullable foreign keys** (applies to `ncl groups update`'s handling of `onecli_instance_id`): use an explicit `--clear-<field>` flag to NULL a column, *not* `--<field> ''`. Empty string would otherwise be written verbatim into the column and break the FK lookup in `getOneCLIForAgent`. So:
+
+```
+ncl groups update --id <ag> --onecli-instance review-bot   # set
+ncl groups update --id <ag> --clear-onecli-instance        # NULL it
+```
+
+This matches the convention used elsewhere in `ncl` for explicit-null operations and avoids the empty-string vs NULL ambiguity. Implementation lives in `src/cli/resources/groups.ts` (or wherever the groups resource updater lives) — the `--clear-onecli-instance` flag maps to `SET onecli_instance_id = NULL`.
+
 ```
 ncl onecli-instances list
 ncl onecli-instances get --id review-bot
-ncl onecli-instances install --id review-bot --name "Review Bot"
+ncl onecli-instances install --id review-bot [--name "Review Bot"]
 ncl onecli-instances remove --id review-bot
 ncl onecli-instances status                # health-check all
 ncl onecli-instances repair --id review-bot # restart docker stack
 ```
+
+`--name` is **optional**. If omitted, it defaults to a humanized version of `--id` (e.g. `review-bot` → `"Review bot"`, first letter capitalized, hyphens to spaces). Both `multi-bot-channels.md` and the `/add-github` skill assume this default behavior — they invoke `ncl onecli-instances install --id <bot-name>` without `--name`.
 
 ### `src/cli/resources/bots.ts`
 
@@ -217,13 +228,24 @@ Current code registers one manual-approval callback against the singleton OneCLI
 ```diff
 - handle = onecli.configureManualApproval(async (request) => { ... });
 + const handles: ManualApprovalHandle[] = [];
-+ for (const instance of listInstances()) {
++ const instances = listInstances();
++ for (const instance of instances) {
 +   const client = getOneCLIById(instance.id);
 +   handles.push(client.configureManualApproval(async (request) => { ... }));
 + }
-+ // Also handle the default singleton for back-compat (NULL instance_id agents)
-+ handles.push(getDefaultOneCLI().configureManualApproval(async (request) => { ... }));
++ // Back-compat callback for NULL instance_id agents that still use the legacy
++ // env-based singleton. CRITICAL: skip this registration if the singleton's
++ // URL is already represented as a listed instance — otherwise (post
++ // `import-default`) every pending approval fires both callbacks against the
++ // same gateway and produces duplicate admin DMs / DB rows.
++ const defaultUrl = process.env.ONECLI_URL;
++ const defaultAlreadyManaged = instances.some(i => i.url === defaultUrl);
++ if (!defaultAlreadyManaged) {
++   handles.push(getDefaultOneCLI().configureManualApproval(async (request) => { ... }));
++ }
 ```
+
+**Double-registration hazard** (explicit so this isn't forgotten in implementation): once `import-default` (phase 2) writes an `onecli_instances` row pointing at the legacy `ONECLI_URL`, that singleton is *both* in `listInstances()` AND reachable via `getDefaultOneCLI()`. Without the URL-equality guard above, the long-poll on `/api/approvals/pending` gets two callbacks attached, and a single pending approval fires both → duplicate admin DM + duplicate `pending_approvals` rows + race on the decision write. The guard is load-bearing.
 
 The approval-handling logic (resolving approver, sending DM) is unchanged — only the registration loops.
 
@@ -254,6 +276,21 @@ Start the health-check loop on boot:
 
 Optional — if we skip this, `status` only updates when `ncl onecli-instances status` is invoked manually. Adding it gets us "down" state surfaced in `ncl bots list` without a manual command.
 
+### `src/db/migrations/index.ts` (2 lines added)
+
+Each new migration must be imported and pushed into the `migrations[]` array in this file (every existing migration follows this pattern — `001-initial.ts` through `015-cli-scope.ts` are all registered here).
+
+```diff
++ import { migrationOnecliInstances } from './NNN-onecli-instances.js';
+  ...
+  const migrations: Migration[] = [
+    ...
++   migrationOnecliInstances,
+  ];
+```
+
+**Conflict risk: medium.** Higher than other upstream-touch files because upstream actively adds new migration entries here. If upstream merges a new migration between our forks, we hit a list-conflict at this line. Resolution is mechanical (re-add both entries), but it's the most likely merge hotspot in this whole feature.
+
 ### Summary of upstream touch
 
 | File | Lines changed | Conflict risk |
@@ -262,55 +299,70 @@ Optional — if we skip this, `status` only updates when `ncl onecli-instances s
 | `src/modules/approvals/onecli-approvals.ts` | 5 | Low (wrapping existing logic in a loop) |
 | `src/cli/dispatch.ts` | 2 | Very low (pure addition) |
 | `src/index.ts` | 2 | Very low (optional) |
+| `src/db/migrations/index.ts` | 2 | Medium (upstream adds new migrations here regularly) |
 
-Everything else is new files. **Total upstream touch: ~11 lines across 4 files.**
+Everything else is new files. **Total upstream touch: ~13 lines across 5 files.**
 
 ## Install wrapper
 
 The upstream install script (`onecli.sh/install`) is curl-piped shell that does `docker compose up`. Its env-var overrides — `ONECLI_BIND_HOST`, `ONECLI_APP_PORT`, `ONECLI_GATEWAY_PORT`, `POSTGRES_PORT`, `ONECLI_VERSION` — get us most of the way there. The hardcoded bits are `INSTALL_DIR=~/.onecli` and compose project name `onecli`.
 
-Two viable wrapper strategies:
+Two candidate strategies. **Option 1 is the conservative default** until the phase-1 spike confirms Option 2 is feasible.
 
-**Option 1: env-override + sed-patch.**
-Run the upstream script with overrides, then patch `INSTALL_DIR` and compose project name post-hoc. Fragile if upstream changes the script's variable names.
+**Option 1 (recommended for phase 1): env-override + sed-patch around the upstream installer.**
+Run the upstream `onecli.sh/install` shell script with the documented env overrides (`ONECLI_BIND_HOST`, `ONECLI_APP_PORT`, `ONECLI_GATEWAY_PORT`, `POSTGRES_PORT`, `ONECLI_VERSION`), then sed-patch the resulting `~/.onecli/docker-compose.yml` to relocate `INSTALL_DIR` and the compose project name. This works against the same upstream artifact path the existing `setup/onecli.ts` already uses (no new fetch URL to discover), at the cost of a slightly fragile sed pass. Tradeoff accepted because the upstream env-var surface is documented and the sed patches are localized.
 
-**Option 2: download upstream's docker-compose.yml ourselves and run `docker compose` directly.**
-The upstream installer's whole job is `docker compose up -d` with overrides. We can do that ourselves. The compose.yml is small and pinned via `ONECLI_VERSION`. We never run upstream's shell script for additional instances; the first OneCLI (created by `setup/onecli.ts`) still uses the upstream script unchanged.
-
-**Recommended: Option 2.** Pseudo-code:
+Pseudo-code:
 
 ```typescript
 async function runInstaller(args): Promise<Result> {
-  // 1. Fetch upstream compose.yml (pinned to ONECLI_GATEWAY_VERSION from setup/onecli.ts)
-  const composeYml = await fetchUpstreamCompose(ONECLI_GATEWAY_VERSION);
-
-  // 2. Template port + volume overrides into a copy in args.installDir
+  // 1. Pre-create the per-instance install dir
   await fs.mkdir(args.installDir, { recursive: true });
-  const patched = applyPortOverrides(composeYml, {
-    appPort: args.appPort,
-    gatewayPort: args.gatewayPort,
-    postgresPort: args.postgresPort,
-    volumePrefix: args.installDir,
-  });
-  await fs.writeFile(path.join(args.installDir, 'docker-compose.yml'), patched);
 
-  // 3. docker compose -p <project> -f <path> up -d --wait
+  // 2. Run upstream installer with port + version overrides
+  await execa('sh', ['-c', 'curl -fsSL onecli.sh/install | sh'], {
+    env: {
+      ...process.env,
+      ONECLI_VERSION: ONECLI_GATEWAY_VERSION,
+      ONECLI_APP_PORT: String(args.appPort),
+      ONECLI_GATEWAY_PORT: String(args.gatewayPort),
+      POSTGRES_PORT: String(args.postgresPort),
+      // Note: ONECLI_BIND_HOST stays default (127.0.0.1)
+    },
+  });
+
+  // 3. Move generated artifacts from ~/.onecli to args.installDir.
+  //    The upstream installer hardcodes ~/.onecli — we relocate post-hoc.
+  await fs.rename(path.join(os.homedir(), '.onecli'), args.installDir);
+
+  // 4. Sed-patch the compose project name in the relocated docker-compose.yml
+  //    and any reference scripts so subsequent `docker compose -p <project>` works.
+  await patchComposeProject(args.installDir, args.composeProject);
+
+  // 5. Re-up under the new compose project name (the upstream installer brought
+  //    it up under project name "onecli"; bring that down first, then up under ours)
+  await execa('docker', ['compose', '-p', 'onecli', 'down']);
   await execa('docker', ['compose', '-p', args.composeProject,
                           '-f', path.join(args.installDir, 'docker-compose.yml'),
                           'up', '-d', '--wait']);
 
-  // 4. Poll the new instance's /api/health
+  // 6. Poll the new instance's /api/health
   await pollHealth(`http://127.0.0.1:${args.appPort}`, 30_000);
 
-  // 5. Generate or fetch the instance's API key via its CLI/admin endpoint
-  // 6. Read out the CA cert path
+  // 7. Generate the instance's API key + read CA cert path
   return { ok: true, ... };
 }
 ```
 
-This pins us to upstream's compose schema, not its install script. The compose schema is fundamentally stable.
+**Sync risk for Option 1:** if upstream renames the env vars or moves `~/.onecli`, the wrapper breaks. Mitigation: pin against `ONECLI_GATEWAY_VERSION` and re-verify on each bump.
 
-**Sync risk:** if upstream OneCLI changes its compose.yml shape (renames services, restructures volumes), our patcher breaks. Mitigation: smoke-test on each `ONECLI_GATEWAY_VERSION` bump and pin to known-good versions.
+**Option 2 (deferred — requires phase-1 spike confirmation): fetch upstream `docker-compose.yml` directly and run `docker compose` ourselves, skipping the upstream shell script entirely.**
+
+This is structurally cleaner — we'd pin against the compose schema, not the install script's quirks. But there is **no documented stable raw-compose URL on `onecli.sh`** that we've confirmed. The existing `setup/onecli.ts` uses `curl -fsSL onecli.sh/install | sh`, which is a shell wrapper that fetches the compose file via paths internal to the script. Treating that internal path as a stable contract would be a footgun.
+
+Promote Option 2 only after the phase-1 spike confirms either (a) a documented `onecli.sh/<version>/docker-compose.yml` URL or equivalent, or (b) `docker.io/onecli/...` image tags + a compose schema we publish ourselves (since the images are public, we could ship our own pinned compose.yml in the nanoclaw repo and just pull images).
+
+If Option 2 becomes viable, swap `runInstaller` to fetch the compose.yml directly and skip steps 2-3 of Option 1. Until then, Option 1 ships.
 
 ## Approvals fan-out
 
@@ -362,6 +414,7 @@ async function listBots(): Promise<BotSummary[]> {
 - `ncl onecli-instances` resource (list, get, install, remove)
 - Manual instructions for the GitHub App registration (open web UI, paste fields)
 - **Spike: app-connections read endpoint.** Half-day probe of a freshly-installed instance — try `GET /api/v1/app-connections` (and a couple of plausible variants) with the instance's API key. If found, document it. If not, commit phase 2 to reading directly from the instance's Postgres (`docker compose exec postgres psql ...`) and open an upstream issue for a future endpoint.
+- **Spike: install-wrapper choice.** Half-day probe to decide between Option 1 (recommended; env-override + sed-patch + relocate) and Option 2 (cleaner; direct compose.yml fetch). For Option 2: try to identify a stable raw `docker-compose.yml` URL on `onecli.sh` for the pinned `ONECLI_GATEWAY_VERSION`. If found and stable, switch to Option 2; otherwise lock in Option 1 and proceed.
 
 After phase 1, you can run two bots end-to-end.
 
@@ -393,6 +446,7 @@ After phase 1, you can run two bots end-to-end.
 - [ ] `src/container-runner.ts` — verify the `onecli.ensureAgent`/`applyContainerConfig` calls still go through `getOneCLIForAgent`. If upstream restructured the spawn flow, port the 1-line call site.
 - [ ] `src/modules/approvals/onecli-approvals.ts` — verify the registration is still wrapped in the `for (instance of listInstances())` loop.
 - [ ] `src/cli/dispatch.ts` — verify both new resources are registered.
+- [ ] `src/db/migrations/index.ts` — verify our migration is still imported and present in the `migrations[]` array. **Most likely conflict hotspot**: if upstream merged a new migration during the sync window, the array literal will have a textual conflict — resolve by keeping both entries.
 - [ ] Schema migrations — verify nothing upstream renamed `agent_groups`.
 - [ ] Run smoke test: spawn an agent group with `onecli_instance_id` set; verify HTTPS_PROXY in the container points at the right port.
 
@@ -423,7 +477,7 @@ Order matters — unwire from agent groups before removing the instance, or the 
 ncl bots get review-bot
 
 # 2. Unwire or delete agent groups that point at it
-ncl groups update --id <agent-group-id> --onecli-instance ''   # detach
+ncl groups update --id <agent-group-id> --clear-onecli-instance   # detach (NULLs the column)
 # or
 ncl groups delete --id <agent-group-id>
 

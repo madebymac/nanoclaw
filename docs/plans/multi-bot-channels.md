@@ -163,7 +163,7 @@ These paths don't compete: the channel adapter's reply posting and the agent's i
 
 ## Webhook routing
 
-Each bot gets its own webhook path: `/webhook/github-review`, `/webhook/github-worker`, etc. The `registerChannelAdapter` call sets this. nanoclaw's webhook server (existing) already routes by path → channel-type → adapter.
+Each bot gets its own webhook path: `/webhook/github-review`, `/webhook/github-worker`, etc. The `registerChannelAdapter` call sets this. nanoclaw's webhook server already routes by path → channel-type → adapter *dynamically*: `src/webhook-server.ts:85-101` uses a `Map<adapterName, adapter>` populated by `registerWebhookAdapter()` and matches incoming requests against `/webhook/{adapterName}`. **No upstream-server change is required** to add new bot paths — registering `channel_type='github-review'` auto-exposes `/webhook/github-review`.
 
 When the operator creates the GitHub App on github.com, they set the webhook URL to `https://<host>/webhook/github-<bot-name>`. Each App posts to its own path. No cross-bot ambiguity.
 
@@ -284,6 +284,7 @@ Rewritten to support the `<bot-name>` arg. This is a skill — lives in the fork
 - [ ] `src/channels/index.ts`: re-add any bot imports that got dropped during the merge.
 - [ ] Wrapper files (`github-*.ts`): preserved (they're nanoclaw-fork artifacts, not in upstream).
 - [ ] `.claude/skills/add-github/`: kept (fork-only).
+- [ ] **If adopting the `github-impl.ts` fallback mid-life** (i.e., upstream rejects the factory PR and we copy the adapter into a fork-only file): every existing wrapper imports `from './github.js'` — those imports must be updated to `from './github-impl.js'`. Don't hand-edit; instead, **regenerate every wrapper file via the `/add-github <bot-name>` skill** so the templated import path stays consistent. The skill template lives in `.claude/skills/add-github/`; update it once to emit `./github-impl.js` imports when the impl file is detected, then re-run for each existing bot. Audit: `grep "from './github\.js'" src/channels/github-*.ts` should return zero matches after the regeneration.
 
 ---
 
@@ -422,5 +423,5 @@ The sub-typed approach is *forward-compatible* with the registry refactor — ev
 ## Open questions
 
 - **Upstream PR for `createGithubAdapter` factory extraction.** Is upstream channels-branch maintained actively enough to accept the PR quickly? If yes, we wait for it before generating wrappers. If no, we go the `github-impl.ts` route immediately.
-- **Webhook server routing.** Does nanoclaw's existing webhook server (port 3000) accept arbitrary paths like `/webhook/github-<bot>`, or is the path-list hardcoded? Need to verify; if hardcoded, that's a small additional upstream-or-fork change.
+- ~~**Webhook server routing.**~~ **Resolved.** `src/webhook-server.ts:85-101` routes `/webhook/{adapterName}` dynamically via a `Map<adapterName, adapter>` populated by `registerWebhookAdapter()`. Registering a new channel adapter with `channelType: 'github-review'` automatically exposes `/webhook/github-review` — no upstream-server change needed. The sub-typed channels approach is unblocked on this front.
 - **Sub-typed vs first-class label.** Should the bot identity be encoded in `channel_type` (as proposed) or in a separate `messaging_groups.bot_label` column with `channel_type='github'` for all of them? The latter is closer to the full registry refactor; the former is cheaper to implement. Going with the former (channel_type encoding) for phase 1; revisit in phase 2 if it causes pain.
