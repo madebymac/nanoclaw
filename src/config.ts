@@ -43,9 +43,7 @@ export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CO
 // tracking remote. When the local checkout is strictly behind upstream and
 // fast-forwardable, the host shells out to `make deploy` via
 // `systemd-run --user --no-block` so the deploy survives the parent's restart.
-// Linux-only (Makefile uses `systemctl --user`). On by default; set
-// `NANOCLAW_SELF_UPGRADE_ENABLED=false` to disable.
-export const SELF_UPGRADE_ENABLED = (process.env.NANOCLAW_SELF_UPGRADE_ENABLED || 'true') !== 'false';
+// Linux-only (Makefile uses `systemctl --user`).
 export const SELF_UPGRADE_INTERVAL_MS = Math.max(
   60_000,
   parseInt(process.env.NANOCLAW_SELF_UPGRADE_INTERVAL_MS || '600000', 10) || 600_000,

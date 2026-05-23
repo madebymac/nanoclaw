@@ -179,7 +179,7 @@ async function main(): Promise<void> {
   startHostSweep();
   log.info('Host sweep started');
 
-  // 6b. Start self-upgrade poller (enabled by default; set NANOCLAW_SELF_UPGRADE_ENABLED=false to disable).
+  // 6b. Start self-upgrade poller.
   startSelfUpgrade();
 
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
