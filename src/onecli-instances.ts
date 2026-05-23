@@ -64,19 +64,3 @@ export function getOneCLIForAgentGroupId(agentGroupId: string): OneCLI {
   if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
   return getOneCLIForAgentGroup(group);
 }
-
-/**
- * All OneCLI clients we know about — instance rows plus (if it has a URL
- * configured) the legacy singleton. Used by callbacks that fan out across
- * instances (approvals, health checks).
- *
- * **Hazard:** once `import-default` lands in phase 2, the legacy singleton
- * gets a row in `onecli_instances` and would also still appear via
- * `ONECLI_URL`. Callers must guard against double-registering — see
- * `multi-onecli.md` "Approvals fan-out."
- */
-export function getAllOneCLIClients(): { id: string; client: OneCLI }[] {
-  // Phase 1: only the singleton is wired. Approvals fan-out lands in phase 2.
-  if (!ONECLI_URL) return [];
-  return [{ id: SINGLETON_KEY, client: singletonClient() }];
-}

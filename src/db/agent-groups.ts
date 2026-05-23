@@ -4,8 +4,8 @@ import { getDb } from './connection.js';
 export function createAgentGroup(group: AgentGroup): void {
   getDb()
     .prepare(
-      `INSERT INTO agent_groups (id, name, folder, agent_provider, created_at)
-       VALUES (@id, @name, @folder, @agent_provider, @created_at)`,
+      `INSERT INTO agent_groups (id, name, folder, agent_provider, onecli_instance_id, created_at)
+       VALUES (@id, @name, @folder, @agent_provider, @onecli_instance_id, @created_at)`,
     )
     .run(group);
 }
