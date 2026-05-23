@@ -32,11 +32,12 @@ A scheduled agent that automatically reviews open pull requests using Claude Opu
 
 ### 3. Configure the files
 
-In **both** `poll-script.js` and `agent-prompt.md`:
-- Set `botLogin` / `BOT_LOGIN` to your GitHub App's bot identity (e.g. `my-review-bot[bot]`)
-
 In `poll-script.js`:
+- Replace `my-review-bot[bot]` with your GitHub App's bot identity
 - Set `repos` to the list of repos to watch
+
+In `agent-prompt.md`:
+- Replace `my-review-bot[bot]` with your GitHub App's bot identity
 
 ### 4. Schedule the task
 
