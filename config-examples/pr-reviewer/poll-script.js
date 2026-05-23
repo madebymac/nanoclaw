@@ -15,15 +15,23 @@ const botLogin = 'my-review-bot[bot]';
 const results = [];
 
 for (const repo of repos) {
-  let prs;
+  let prs = [];
   try {
-    const prsRes = await fetch(`https://api.github.com/repos/${repo}/pulls?state=open&per_page=50`);
-    if (!prsRes.ok) {
-      process.stderr.write(`Failed to fetch PRs for ${repo}: ${prsRes.status}\n`);
-      continue;
+    let page = 1;
+    while (true) {
+      const res = await fetch(
+        `https://api.github.com/repos/${repo}/pulls?state=open&per_page=100&page=${page}`
+      );
+      if (!res.ok) {
+        process.stderr.write(`Failed to fetch PRs for ${repo}: ${res.status}\n`);
+        break;
+      }
+      const batch = await res.json();
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      prs.push(...batch);
+      if (batch.length < 100) break;
+      page++;
     }
-    prs = await prsRes.json();
-    if (!Array.isArray(prs)) continue;
   } catch (err) {
     process.stderr.write(`Error fetching PRs for ${repo}: ${err.message}\n`);
     continue;
