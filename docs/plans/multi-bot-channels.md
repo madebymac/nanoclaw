@@ -149,13 +149,17 @@ GITHUB_TOKEN_CLEANUP=...
 
 The default bot keeps the unsuffixed names (`GITHUB_TOKEN`, etc.) — unchanged for existing installs.
 
-**Why env vars and not the OneCLI vault?** Two reasons:
-1. The Chat SDK's GitHub adapter reads the token at construction time, not per-request. OneCLI's vault is request-time injection via proxy.
-2. The webhook secret is host-side (used to verify GitHub's incoming webhook signature), so it must live on the host — it isn't an outbound API credential.
+**Why env vars and not the OneCLI vault?** Because there are two distinct outbound code paths and they need different credential sources:
 
-Future: GitHub App tokens (which expire hourly) could be sourced via OneCLI proxy; the static webhook secret stays in env. For now, both in env for symmetry.
+1. **Channel adapter posting (host-side).** When the agent produces a reply, the channel adapter (running in the nanoclaw host process) is what actually calls `api.github.com` to post the comment. The Chat SDK GitHub adapter reads its token at construction time, not per-request, so it can't easily route through the OneCLI proxy. Its token is the bot's primary identity — what appears in PR threads as "review-bot commented." That's `GITHUB_TOKEN_<BOT>` in env.
 
-The Anthropic API key (for the agent talking to Claude) and any tool-side credentials still flow through the per-bot OneCLI instance, so the OneCLI side is doing its job.
+2. **Agent in-container API calls.** When the agent inside its container makes its own GitHub API calls (via `curl`, the GitHub MCP tool, `gh` CLI, etc.), those calls go through `HTTPS_PROXY` → the agent group's pinned OneCLI gateway → credential injection from that instance's vault. This is what `multi-onecli.md` is about. The env-var token from path #1 plays no part here.
+
+The webhook secret is also host-side (used to verify GitHub's incoming webhook signature), so it must live on the host — it isn't an outbound API credential at all.
+
+These paths don't compete: the channel adapter's reply posting and the agent's in-container API use are different operations against different credentials, and a bot can use both at once without confusion. Each bot's GitHub App therefore needs both its env-var PAT (for the adapter) and its registration in the bot's OneCLI instance (for the agent's in-container calls). The OneCLI re-architecture and the channel sub-typing are complementary, not redundant.
+
+**Future:** if/when the Chat SDK gains support for per-request token resolution (or we accept the cost of rewriting that part of the adapter), the env-var PAT could be replaced with a refreshable GitHub App installation token fetched via OneCLI. Out of scope for this plan — we ship with both PATs and OneCLI in their current shapes.
 
 ## Webhook routing
 
@@ -173,22 +177,22 @@ Side benefit: someone can write `@review-bot ping @worker-bot` in one comment an
 
 ## messaging_groups stays the same
 
-The `messaging_groups` schema doesn't change. Each repo wired to a bot creates one row:
+The `messaging_groups` schema doesn't change. The relevant constraint is `UNIQUE(channel_type, platform_id)` (`src/db/schema.ts:34`). `platform_id` stays in the upstream-conventional format — `github:owner/repo` — regardless of which bot the row belongs to. The bot identity lives entirely in `channel_type`. Each repo wired to a bot creates one row:
 
 ```sql
 INSERT INTO messaging_groups (id, channel_type, platform_id, name, ...)
 VALUES (
   'mg-review-acme-backend',
   'github-review',              -- not 'github'!
-  'github-review:acme/backend',
+  'github:acme/backend',        -- upstream convention, unchanged per bot
   'acme/backend (review)',
   ...
 );
 ```
 
-Note the `platform_id` is prefixed with the channel_type to keep it unique if (later) you wire the same repo to multiple bots. The `UNIQUE(channel_type, platform_id)` constraint already keeps things consistent — the same repo can be wired to both `github-review` and `github-worker` because the channel_type differs.
+The same repo can be wired to both `github-review` and `github-worker` simultaneously — the tuple `('github-review', 'github:acme/backend')` differs from `('github-worker', 'github:acme/backend')`, so the UNIQUE constraint is satisfied. Crucially, the bot identity appears in exactly one column (`channel_type`); there's no second copy in `platform_id` to drift out of sync.
 
-`messaging_group_agents` (wiring to agent groups) doesn't change; it operates on messaging_group_id.
+`messaging_group_agents` (wiring to agent groups) doesn't change; it operates on `messaging_group_id`.
 
 ## The `/add-github <bot-name>` skill
 
@@ -216,7 +220,13 @@ Existing installs run one bot via `channel_type='github'`. After this feature sh
 
 - That setup keeps working identically. No migration required.
 - To add a second bot, just `/add-github <new-bot-name>`. The original keeps running as `github`; the new one runs as `github-<name>`.
-- To convert the existing `github` into a named bot (e.g., rename it `default-bot` so it shows up in `ncl bots list` consistently): re-run `/add-github default-bot` (generates the wrapper), update messaging_groups to use `channel_type='github-default-bot'`, delete the old default. This is mechanical SQL. Probably wrap it as `ncl bots rename-default --to <bot-name>` in phase 2.
+- To convert the existing `github` into a named bot (e.g., rename it `default-bot` so it shows up in `ncl bots list` consistently): re-run `/add-github default-bot` (generates the wrapper), then bulk-update messaging_groups:
+  ```sql
+  UPDATE messaging_groups
+     SET channel_type = 'github-default-bot'
+   WHERE channel_type = 'github';
+  ```
+  `platform_id` does not need to change (no bot identity is encoded in it — see the section above). Finally, delete the wrapper/imports/env vars for the now-unused `github` channel. Probably wrap the whole thing as `ncl bots rename-default --to <bot-name>` in phase 2.
 
 Until that migration is run, the default `github` channel coexists fine with the named ones.
 
@@ -290,13 +300,18 @@ Assumes the OneCLI instance is already provisioned (see `multi-onecli.md` runboo
    - `GITHUB_BOT_USERNAME_<BOT>` (the bot account's GitHub username — used for `@`-mention detection)
 3. The skill writes a new wrapper file, appends to `index.ts`, runs `pnpm run build`.
 4. Skill prints the webhook URL: `https://<host>/webhook/github-<bot-name>`. Paste this into the GitHub App → Webhook → Payload URL, and the secret from step 2 into Webhook → Secret.
-5. Restart nanoclaw:
+5. Sync the new env vars to the container env file (the container reads from `data/env/env`, not `.env` directly):
+   ```bash
+   cp .env data/env/env
+   ```
+   Skipping this step is the most common cause of "I added a bot but it doesn't show up" — see the diagnosis section below.
+6. Restart nanoclaw:
    ```bash
    source setup/lib/install-slug.sh
    launchctl kickstart -k gui/$(id -u)/$(launchd_label)   # macOS
    systemctl --user restart $(systemd_unit)               # Linux
    ```
-6. Wire repos: create messaging_groups with `channel_type='github-<bot-name>'` (use `/manage-channels` or insert manually — see template in skill output).
+7. Wire repos: create messaging_groups with `channel_type='github-<bot-name>'` (use `/manage-channels` or insert manually — see template in skill output).
 
 ### Removing a bot (channel side)
 

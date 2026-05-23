@@ -69,6 +69,14 @@ ALTER TABLE agent_groups ADD COLUMN onecli_instance_id TEXT
   REFERENCES onecli_instances(id);
 -- Nullable. NULL means "use the default singleton" (back-compat for existing
 -- installs that haven't created any explicit instances).
+--
+-- NOTE: SQLite does not enforce REFERENCES clauses added via ALTER TABLE
+-- ADD COLUMN (they are documentary only), and even table-level FK
+-- constraints require `PRAGMA foreign_keys=ON` per connection. Referential
+-- integrity for this column is enforced at the application layer by
+-- `removeInstance` (which refuses to remove an instance while any
+-- agent_group references it). The REFERENCES clause stays for
+-- documentation and for future migration to a stricter DB.
 ```
 
 Migration is additive and idempotent; matches the pattern in `src/db/migrations/module-approvals-pending-approvals.ts`.
@@ -100,9 +108,19 @@ export interface OnecliInstance {
 export function listInstances(): OnecliInstance[];
 export function getInstance(id: string): OnecliInstance | null;
 
+// Returns the SDK client for a specific instance id. Throws if the id is
+// unknown. Used by code paths that operate on a known instance (e.g. the
+// approvals fan-out below).
+export function getOneCLIById(id: string): OneCLI;
+
+// Returns the env-based singleton (constructed from ONECLI_URL +
+// ONECLI_API_KEY). Used as the fallback for agent groups with
+// onecli_instance_id IS NULL, and for the back-compat callback in
+// approvals.
+export function getDefaultOneCLI(): OneCLI;
+
 // Returns the right OneCLI SDK client for this agent group.
-// Falls back to the env-based singleton when onecli_instance_id is NULL
-// (back-compat for installs predating this feature).
+// Composes getOneCLIById / getDefaultOneCLI based on agentGroup.onecli_instance_id.
 export function getOneCLIForAgent(agentGroup: AgentGroup): OneCLI;
 
 // Provision a new instance: pick free ports, run upstream installer with
@@ -172,7 +190,7 @@ See "Install wrapper" section below for what it actually does.
 
 These are the only upstream-overlapping changes. All other work is in new files.
 
-### `src/container-runner.ts` (~3 lines touched)
+### `src/container-runner.ts` (2 lines touched)
 
 ```diff
 - import { OneCLI } from '@onecli-sh/sdk';
@@ -181,24 +199,14 @@ These are the only upstream-overlapping changes. All other work is in new files.
 + import { getOneCLIForAgent } from './onecli-instances.js';
 
   // (at the existing call site around line 426)
-  if (agentIdentifier) {
-+   const onecli = getOneCLIForAgent(agentGroup);
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
-+ } else {
-+   var onecli = getOneCLIForAgent(agentGroup);
-  }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-```
-
-Cleaner version that avoids the `var` hoist:
-
-```diff
 + const onecli = getOneCLIForAgent(agentGroup);
   if (agentIdentifier) {
     await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
   }
   const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
 ```
+
+Hoisting `const onecli` above the `if` keeps it visible at the `applyContainerConfig` call site regardless of which branch ran. The singleton import on line 50 is removed entirely.
 
 **Conflict footprint:** the deleted module-level singleton (line 50) and a 1-line addition at the existing OneCLI call site (around line 426). If upstream nanoclaw renames or moves these, we get a small mechanical conflict; the logic stays in the new file.
 
@@ -208,12 +216,13 @@ Current code registers one manual-approval callback against the singleton OneCLI
 
 ```diff
 - handle = onecli.configureManualApproval(async (request) => { ... });
++ const handles: ManualApprovalHandle[] = [];
 + for (const instance of listInstances()) {
-+   const client = getOneCLI(instance.id);
++   const client = getOneCLIById(instance.id);
 +   handles.push(client.configureManualApproval(async (request) => { ... }));
 + }
 + // Also handle the default singleton for back-compat (NULL instance_id agents)
-+ handles.push(defaultOneCLI.configureManualApproval(async (request) => { ... }));
++ handles.push(getDefaultOneCLI().configureManualApproval(async (request) => { ... }));
 ```
 
 The approval-handling logic (resolving approver, sending DM) is unchanged — only the registration loops.
@@ -249,12 +258,12 @@ Optional — if we skip this, `status` only updates when `ncl onecli-instances s
 
 | File | Lines changed | Conflict risk |
 |---|---|---|
-| `src/container-runner.ts` | 3-4 | Low (small change in hot file) |
+| `src/container-runner.ts` | 2 | Low (small change in hot file) |
 | `src/modules/approvals/onecli-approvals.ts` | 5 | Low (wrapping existing logic in a loop) |
 | `src/cli/dispatch.ts` | 2 | Very low (pure addition) |
-| `src/index.ts` | 1 | Very low (optional) |
+| `src/index.ts` | 2 | Very low (optional) |
 
-Everything else is new files. **Total upstream touch: ~12 lines across 4 files.**
+Everything else is new files. **Total upstream touch: ~11 lines across 4 files.**
 
 ## Install wrapper
 
@@ -341,22 +350,23 @@ async function listBots(): Promise<BotSummary[]> {
 }
 ```
 
-**Unknown to verify when implementing:** the exact path of OneCLI's app-connections list endpoint. The schema has `app_connections` and the web UI lists them, so an API exists — but we haven't confirmed it's exposed at a stable URL. If it isn't, fallback options are (a) read directly from the instance's Postgres (ugly but possible since we own the install), or (b) open an upstream issue requesting a stable read endpoint.
+**Endpoint resolution (decided during phase-1 spike, see below):** the schema has `app_connections` and the web UI lists them, so an API exists — but we haven't confirmed it's exposed at a stable URL. Phase 1 includes a half-day spike to either confirm the endpoint or commit to the Postgres-direct fallback. Phase 2 plans against whatever phase 1 nails down — no "unknown" gating phase 2.
 
 ## Phased delivery
 
 **Phase 1 — minimum viable multi-instance** (~2-3 days):
 - Migration + `onecli_instances` table + `agent_groups.onecli_instance_id`
-- `src/onecli-instances.ts` core (list, get, `getOneCLIForAgent`)
+- `src/onecli-instances.ts` core (list, get, `getOneCLIById`, `getDefaultOneCLI`, `getOneCLIForAgent`)
 - `installInstance` via Option 2 wrapper
 - `container-runner.ts` diff
 - `ncl onecli-instances` resource (list, get, install, remove)
 - Manual instructions for the GitHub App registration (open web UI, paste fields)
+- **Spike: app-connections read endpoint.** Half-day probe of a freshly-installed instance — try `GET /api/v1/app-connections` (and a couple of plausible variants) with the instance's API key. If found, document it. If not, commit phase 2 to reading directly from the instance's Postgres (`docker compose exec postgres psql ...`) and open an upstream issue for a future endpoint.
 
 After phase 1, you can run two bots end-to-end.
 
 **Phase 2 — operational polish** (~1-2 days):
-- `ncl bots list` + `ncl bots get` (unified view)
+- `ncl bots list` + `ncl bots get` (unified view), implemented against whichever data source phase 1 settled on
 - Approvals fan-out
 - Health-check loop
 - `/add-onecli-instance` skill
@@ -380,7 +390,7 @@ After phase 1, you can run two bots end-to-end.
 5. **No changes to upstream OneCLI source.** We use the published compose.yml; no fork.
 
 **Re-port checklist** (when running `/update-nanoclaw`):
-- [ ] `src/container-runner.ts` — verify the `onecli.ensureAgent`/`applyContainerConfig` calls still go through `getOneCLIForAgent`. If upstream restructured the spawn flow, port the 2-line call site.
+- [ ] `src/container-runner.ts` — verify the `onecli.ensureAgent`/`applyContainerConfig` calls still go through `getOneCLIForAgent`. If upstream restructured the spawn flow, port the 1-line call site.
 - [ ] `src/modules/approvals/onecli-approvals.ts` — verify the registration is still wrapped in the `for (instance of listInstances())` loop.
 - [ ] `src/cli/dispatch.ts` — verify both new resources are registered.
 - [ ] Schema migrations — verify nothing upstream renamed `agent_groups`.
@@ -527,7 +537,7 @@ Existing installs have one OneCLI from `setup/onecli.ts`. After this feature shi
 ### Invariants (do not violate)
 
 - **One OneCLI instance per bot identity.** Never multiplex two GitHub Apps into one vault — that's the upstream constraint we're working around. Putting two Apps in one instance defeats the whole point.
-- **`onecli_instance_id` is per-agent-group, never per-session.** Sessions inherit their agent group's instance.
+- **`onecli_instance_id` is per-agent-group, never per-session.** Sessions inherit their agent group's instance. `container-runner.ts` resolves the agent group from the session at spawn time (`sessions.agent_group_id` → `agent_groups` row) and then calls `getOneCLIForAgent(agentGroup)`. Any future code path that has only a `session_id` in hand must perform the same join — do **not** introduce a `getOneCLIForSession` shortcut, since it would hide where the instance binding lives and make it easy to accidentally bypass the agent-group-level pinning.
 - **Each instance owns its own Postgres volume.** Never share volumes between instances; you'd corrupt both.
 - **The "default" fallback path stays alive.** Don't delete the legacy singleton code path until all existing installs have migrated. NULL `onecli_instance_id` must keep working forever (or at least one major version).
 - **Ports are unique per host.** The schema enforces this with UNIQUE constraints. If port allocation fails, fail loud — don't fall back to "first available," because that would silently let two instances clobber each other on restart.
@@ -555,8 +565,9 @@ Existing installs have one OneCLI from `setup/onecli.ts`. After this feature shi
 
 ## Open questions
 
-- **OneCLI's app-connections read API.** The web UI lists registered Apps, but is there a stable REST endpoint? Need to verify before implementing `ncl bots list`. Fallback is reading Postgres directly.
 - **GitHub App registration via CLI.** If OneCLI's `secrets create --type github-app` accepts client_id + private_key fields, we can fully script step 3 of bot setup. Currently unknown — verify when implementing phase 2.
+
+(The app-connections read API question is no longer open here — it's a phase-1 spike deliverable. See "Phased delivery.")
 - **Health-check interval.** 60s feels right; faster would noisy-poll N instances. Adjust based on real usage.
 - **What happens if an agent group's pinned instance is removed?** Options: (a) refuse to remove (current proposal — refuses if `agent_groups` references it); (b) auto-detach and fall back to default singleton; (c) auto-detach and leave the group broken. Going with (a) for safety.
 - **Upgrade path when `ONECLI_GATEWAY_VERSION` bumps.** Right now `setup/onecli.ts` pins one version. Multi-instance probably wants per-instance version pinning so old bots can stay on a known version while new ones use the latest. Phase 3 concern.
