@@ -27,7 +27,8 @@ for (const repo of repos) {
         `https://api.github.com/repos/${repo}/pulls?state=open&per_page=100&page=${page}`
       );
       if (!res.ok) {
-        process.stderr.write(`Failed to fetch PRs for ${repo}: ${res.status}\n`);
+        const body = await res.text().catch(() => '');
+        process.stderr.write(`Failed to fetch PRs for ${repo}: ${res.status} ${body.slice(0, 200)}\n`);
         break;
       }
       const batch = await res.json();
@@ -47,16 +48,23 @@ for (const repo of repos) {
     if (pr.draft) continue;
     if (pr.user && pr.user.login === botLogin) continue;
 
-    let reviews;
+    // Fetch all reviews — paginate to handle PRs with many reviews.
+    // Use a failure flag: if any fetch fails we skip the PR rather than
+    // treating it as never-reviewed, which would cause a duplicate review
+    // on every poll cycle until the API recovers.
+    let reviews = [];
+    let reviewFetchFailed = false;
     try {
-      // Fetch all reviews — paginate to handle PRs with many reviews
-      reviews = [];
       let page = 1;
       while (true) {
         const res = await fetch(
           `https://api.github.com/repos/${repo}/pulls/${pr.number}/reviews?per_page=100&page=${page}`
         );
-        if (!res.ok) break;
+        if (!res.ok) {
+          process.stderr.write(`Failed to fetch reviews for ${repo}#${pr.number}: ${res.status}\n`);
+          reviewFetchFailed = true;
+          break;
+        }
         const batch = await res.json();
         if (!Array.isArray(batch) || batch.length === 0) break;
         reviews.push(...batch);
@@ -65,8 +73,10 @@ for (const repo of repos) {
       }
     } catch (err) {
       process.stderr.write(`Error fetching reviews for ${repo}#${pr.number}: ${err.message}\n`);
-      continue;
+      reviewFetchFailed = true;
     }
+
+    if (reviewFetchFailed) continue;
 
     const botReviews = reviews.filter(r => r.user && r.user.login === botLogin);
 
