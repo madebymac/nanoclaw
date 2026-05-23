@@ -16,6 +16,7 @@ import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runti
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
+import { startSelfUpgrade, stopSelfUpgrade } from './self-upgrade.js';
 import { log, installConsoleCapture } from './log.js';
 
 // Route stray console.* writes from third-party deps through our logger so
@@ -178,6 +179,9 @@ async function main(): Promise<void> {
   startHostSweep();
   log.info('Host sweep started');
 
+  // 6b. Start self-upgrade poller (no-op unless NANOCLAW_SELF_UPGRADE_ENABLED=true).
+  startSelfUpgrade();
+
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
 
@@ -196,6 +200,7 @@ async function shutdown(signal: string): Promise<void> {
   }
   stopDeliveryPolls();
   stopHostSweep();
+  stopSelfUpgrade();
   await stopCliServer();
   try {
     await teardownChannelAdapters();
