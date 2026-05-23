@@ -1,5 +1,6 @@
 .PHONY: deploy build restart logs status install
 .PHONY: build-shared deploy-all install-all
+.PHONY: new-instance install-onecli install-instance
 
 # Single-install (legacy) unit name: hash of CWD only.
 UNIT := nanoclaw-v2-$(shell printf %s "$(CURDIR)" | sha1sum | cut -c1-8)
@@ -97,3 +98,39 @@ status-%:
 
 install-%:
 	NCL_INSTANCE=$* pnpm exec tsx setup/index.ts --step service
+
+# ----- name-arg targets (zero-manual UX) ------------------------------------
+#
+# `make new-instance NAME=review` → render instances/review/.env from
+# instances.conf (auto-assigns OneCLI port triple).
+#
+# `make install-onecli NAME=review` → install OneCLI gateway + CLI for this
+# instance under its own docker-compose project on the assigned port triple.
+# Wraps the upstream onecli.sh installer with COMPOSE_PROJECT_NAME + best-
+# effort port override env vars.
+#
+# `make install-instance NAME=review` → end-to-end: render env (if missing) +
+# install OneCLI + register systemd unit. The one command that takes a fresh
+# instance entry in instances.conf to a running service.
+
+NAME ?=
+
+new-instance:
+	@if [ -z "$(NAME)" ]; then echo "usage: make new-instance NAME=<name>" >&2; exit 2; fi
+	scripts/render-instance-env.sh $(NAME)
+
+install-onecli:
+	@if [ -z "$(NAME)" ]; then echo "usage: make install-onecli NAME=<name>" >&2; exit 2; fi
+	@if [ ! -f instances/$(NAME)/.env ]; then \
+	  echo "instances/$(NAME)/.env missing — run \`make new-instance NAME=$(NAME)\` first" >&2; \
+	  exit 1; \
+	fi
+	NCL_INSTANCE=$(NAME) pnpm exec tsx setup/onecli.ts
+
+install-instance:
+	@if [ -z "$(NAME)" ]; then echo "usage: make install-instance NAME=<name>" >&2; exit 2; fi
+	@if [ ! -f instances/$(NAME)/.env ]; then \
+	  $(MAKE) new-instance NAME=$(NAME); \
+	fi
+	$(MAKE) install-onecli NAME=$(NAME)
+	NCL_INSTANCE=$(NAME) pnpm exec tsx setup/index.ts --step service

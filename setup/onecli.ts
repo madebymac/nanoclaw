@@ -21,6 +21,63 @@ import { emitStatus } from './status.js';
 
 const LOCAL_BIN = path.join(os.homedir(), '.local', 'bin');
 
+/**
+ * Multi-instance support: when NCL_INSTANCE is set, OneCLI lives under its
+ * own compose project + install dir + port triple. Without it, behaviour is
+ * unchanged — single-install at the default compose project name "onecli".
+ */
+function instanceContext(): {
+  name: string;
+  composeProject: string;
+  envFile: string;
+  installDir: string;
+  appPort: number | null;
+  gatewayPort: number | null;
+  postgresPort: number | null;
+} {
+  const name = (process.env.NCL_INSTANCE || '').trim();
+  const projectRoot = process.cwd();
+  if (!name) {
+    return {
+      name: '',
+      composeProject: 'onecli',
+      envFile: path.join(projectRoot, '.env'),
+      installDir: path.join(os.homedir(), '.onecli'),
+      appPort: null,
+      gatewayPort: null,
+      postgresPort: null,
+    };
+  }
+  const envFile = path.join(projectRoot, 'instances', name, '.env');
+  // Port triple is already written into instances/<name>/.env by
+  // scripts/render-instance-env.sh — parse it back out so the upstream
+  // installer (and the legacy-cleanup probe) see the right numbers.
+  const appPort = parseEnvPort(envFile, 'ONECLI_URL');
+  return {
+    name,
+    composeProject: `onecli-${name}`,
+    envFile,
+    installDir: path.join(os.homedir(), `.onecli-${name}`),
+    appPort,
+    gatewayPort: appPort !== null ? appPort + 1 : null,
+    postgresPort: appPort !== null ? appPort + 2 : null,
+  };
+}
+
+function parseEnvPort(envFile: string, key: string): number | null {
+  try {
+    const content = fs.readFileSync(envFile, 'utf-8');
+    const re = new RegExp(`^${key}=(.+)$`, 'm');
+    const m = re.exec(content);
+    if (!m) return null;
+    const url = m[1].trim().replace(/^["']|["']$/g, '');
+    const portMatch = url.match(/:(\d+)(?:\/|$)/);
+    return portMatch ? parseInt(portMatch[1], 10) : null;
+  } catch {
+    return null;
+  }
+}
+
 function childEnv(): NodeJS.ProcessEnv {
   const parts = [LOCAL_BIN];
   if (process.env.PATH) parts.push(process.env.PATH);
@@ -86,8 +143,8 @@ function ensureShellProfilePath(): void {
   }
 }
 
-function writeEnvVar(name: string, value: string): void {
-  const envFile = path.join(process.cwd(), '.env');
+function writeEnvVar(name: string, value: string, envFile: string = path.join(process.cwd(), '.env')): void {
+  fs.mkdirSync(path.dirname(envFile), { recursive: true });
   let content = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf-8') : '';
   const re = new RegExp(`^${name}=.*$`, 'm');
   if (re.test(content)) {
@@ -98,8 +155,8 @@ function writeEnvVar(name: string, value: string): void {
   fs.writeFileSync(envFile, content);
 }
 
-function writeEnvOnecliUrl(url: string): void {
-  writeEnvVar('ONECLI_URL', url);
+function writeEnvOnecliUrl(url: string, envFile?: string): void {
+  writeEnvVar('ONECLI_URL', url, envFile ?? path.join(process.cwd(), '.env'));
 }
 
 // Last-known-good CLI release. Used only if BOTH the upstream installer
@@ -116,17 +173,18 @@ function installOnecliCliOnly(): { stdout: string; ok: boolean } {
   return { stdout: upstream.stdout + (upstream.stderr ?? '') + '\n' + fallback.stdout, ok: fallback.ok };
 }
 
-// Remove containers in the "onecli" compose project whose service name isn't
-// in the v2 set. Pre-v2 OneCLI used service "app" (container onecli-app-1);
-// v2 uses "onecli". Compose flags the old container as an orphan but won't
-// stop it without --remove-orphans, leaving port 10254 bound and crashing
-// the new bring-up. Filed upstream; this is the downstream workaround.
-function removeLegacyOnecliContainers(): string {
+// Remove containers in the configured compose project whose service name
+// isn't in the v2 set. Pre-v2 OneCLI used service "app" (container
+// onecli-app-1); v2 uses "onecli". Compose flags the old container as an
+// orphan but won't stop it without --remove-orphans, leaving the app port
+// bound and crashing the new bring-up. Filed upstream; this is the
+// downstream workaround.
+function removeLegacyOnecliContainers(composeProject: string): string {
   const out: string[] = [];
   let list = '';
   try {
     list = execSync(
-      `docker ps -a --filter "label=com.docker.compose.project=onecli" --format '{{.Names}}|{{.Label "com.docker.compose.service"}}'`,
+      `docker ps -a --filter "label=com.docker.compose.project=${composeProject}" --format '{{.Names}}|{{.Label "com.docker.compose.service"}}'`,
       { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
     ).trim();
   } catch {
@@ -147,14 +205,22 @@ function removeLegacyOnecliContainers(): string {
   return out.join('\n');
 }
 
-function installOnecli(): { stdout: string; ok: boolean } {
+function installOnecli(ctx: ReturnType<typeof instanceContext>): { stdout: string; ok: boolean } {
   let stdout = '';
 
-  const cleanup = removeLegacyOnecliContainers();
+  const cleanup = removeLegacyOnecliContainers(ctx.composeProject);
   if (cleanup) stdout += cleanup + '\n';
 
   // Gateway install (docker-compose based, no rate-limit concerns).
-  const gw = runInstall(`export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl -fsSL onecli.sh/install | sh`);
+  // For multi-instance: set COMPOSE_PROJECT_NAME so the upstream installer's
+  // `docker compose up` lands under our per-instance project, and pass a
+  // speculative bundle of port/dir override env vars in case the installer
+  // honors them. Single-install path (NCL_INSTANCE unset) omits the exports
+  // entirely so behavior is bit-identical to before.
+  const overrideExports = buildInstallerExports(ctx);
+  const gw = runInstall(
+    `${overrideExports}export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl -fsSL onecli.sh/install | sh`,
+  );
   stdout += gw.stdout;
   if (!gw.ok) {
     log.error('OneCLI gateway install failed', { stderr: gw.stderr });
@@ -182,6 +248,28 @@ function installOnecli(): { stdout: string; ok: boolean } {
     return { stdout, ok: false };
   }
   return { stdout, ok: true };
+}
+
+/**
+ * Build the `export FOO=bar && ` prefix for the upstream installer invocation.
+ * For single-install (ctx.name === '') returns '' so the curl-piped sh sees
+ * exactly the environment it always saw. For per-instance installs, exports
+ * COMPOSE_PROJECT_NAME (standard docker-compose env — almost certainly
+ * honored) plus a best-effort bundle of port/dir override names. If the
+ * upstream installer ignores the port overrides, the gateway will land on
+ * its default port and the subsequent health/URL check will fail visibly
+ * rather than silently misbehave.
+ */
+function buildInstallerExports(ctx: ReturnType<typeof instanceContext>): string {
+  if (!ctx.name) return '';
+  const parts: string[] = [`COMPOSE_PROJECT_NAME=${ctx.composeProject}`, `ONECLI_HOME=${ctx.installDir}`];
+  if (ctx.appPort !== null) {
+    parts.push(`ONECLI_APP_PORT=${ctx.appPort}`);
+    parts.push(`ONECLI_PORT=${ctx.appPort}`);
+  }
+  if (ctx.gatewayPort !== null) parts.push(`ONECLI_GATEWAY_PORT=${ctx.gatewayPort}`);
+  if (ctx.postgresPort !== null) parts.push(`ONECLI_POSTGRES_PORT=${ctx.postgresPort}`);
+  return parts.map((p) => `export ${p}`).join(' && ') + ' && ';
 }
 
 function runInstall(cmd: string): { stdout: string; stderr?: string; ok: boolean } {
@@ -294,6 +382,22 @@ export async function run(args: string[]): Promise<void> {
   const reuse = args.includes('--reuse');
   const remoteUrlIdx = args.indexOf('--remote-url');
   const remoteUrl = remoteUrlIdx !== -1 ? args[remoteUrlIdx + 1] : null;
+  const ctx = instanceContext();
+  if (ctx.name) {
+    log.info('OneCLI setup for instance', {
+      instance: ctx.name,
+      composeProject: ctx.composeProject,
+      installDir: ctx.installDir,
+      appPort: ctx.appPort,
+    });
+    if (ctx.appPort === null) {
+      log.error(
+        `Could not parse ONECLI_URL port from ${ctx.envFile}. ` +
+          `Run \`make new-instance NAME=${ctx.name}\` first to generate the per-instance .env.`,
+      );
+      process.exit(1);
+    }
+  }
   ensureShellProfilePath();
 
   if (remoteUrl) {
@@ -319,7 +423,7 @@ export async function run(args: string[]): Promise<void> {
     } catch (err) {
       log.warn('onecli config set api-host failed', { err });
     }
-    writeEnvOnecliUrl(remoteUrl);
+    writeEnvOnecliUrl(remoteUrl, ctx.envFile);
     log.info('Wrote ONECLI_URL to .env', { url: remoteUrl });
     const remoteToken = process.env.NANOCLAW_ONECLI_API_TOKEN?.trim();
     if (remoteToken) {
@@ -335,8 +439,8 @@ export async function run(args: string[]): Promise<void> {
       } catch (err) {
         log.warn('onecli auth login failed', { err });
       }
-      writeEnvVar('ONECLI_API_KEY', remoteToken);
-      log.info('Wrote ONECLI_API_KEY to .env');
+      writeEnvVar('ONECLI_API_KEY', remoteToken, ctx.envFile);
+      log.info('Wrote ONECLI_API_KEY to .env', { envFile: ctx.envFile });
     }
     const healthy = await pollHealth(remoteUrl, 5000);
     emitStatus('ONECLI', {
@@ -375,8 +479,8 @@ export async function run(args: string[]): Promise<void> {
       });
       process.exit(1);
     }
-    writeEnvOnecliUrl(url);
-    log.info('Reusing existing OneCLI', { url });
+    writeEnvOnecliUrl(url, ctx.envFile);
+    log.info('Reusing existing OneCLI', { url, envFile: ctx.envFile });
     const healthy = await pollHealth(url, 5000);
     emitStatus('ONECLI', {
       INSTALLED: true,
@@ -390,7 +494,7 @@ export async function run(args: string[]): Promise<void> {
   }
 
   log.info('Installing OneCLI gateway and CLI');
-  const res = installOnecli();
+  const res = installOnecli(ctx);
   if (!res.ok) {
     emitStatus('ONECLI', {
       INSTALLED: false,
@@ -411,7 +515,17 @@ export async function run(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const url = extractUrlFromOutput(res.stdout);
+  // For multi-instance: trust the configured port from instances/<name>/.env
+  // rather than whatever the installer printed (which might be the default
+  // even when the gateway honored our override). For single-install: parse
+  // the URL out of the installer output, as before.
+  let url: string | null;
+  if (ctx.name && ctx.appPort !== null) {
+    url = `http://127.0.0.1:${ctx.appPort}`;
+    log.info('Using configured instance OneCLI URL', { url, instance: ctx.name });
+  } else {
+    url = extractUrlFromOutput(res.stdout);
+  }
   if (!url) {
     emitStatus('ONECLI', {
       INSTALLED: true,
@@ -432,10 +546,17 @@ export async function run(args: string[]): Promise<void> {
     log.warn('onecli config set api-host failed', { err });
   }
 
-  writeEnvOnecliUrl(url);
-  log.info('Wrote ONECLI_URL to .env', { url });
+  writeEnvOnecliUrl(url, ctx.envFile);
+  log.info('Wrote ONECLI_URL to .env', { url, envFile: ctx.envFile });
 
   const healthy = await pollHealth(url, 15000);
+  if (ctx.name && !healthy) {
+    log.error(
+      `OneCLI gateway for instance "${ctx.name}" is not responding at ${url}. ` +
+        `The upstream installer may have ignored ONECLI_APP_PORT/ONECLI_PORT overrides. ` +
+        `Check 'docker compose -p ${ctx.composeProject} ps' and 'docker compose -p ${ctx.composeProject} logs' on the host.`,
+    );
+  }
 
   emitStatus('ONECLI', {
     INSTALLED: true,
