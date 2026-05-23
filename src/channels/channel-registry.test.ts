@@ -132,6 +132,7 @@ describe('channel + router integration', () => {
       name: 'Test Agent',
       folder: 'test-agent',
       agent_provider: null,
+      onecli_instance_id: null,
       created_at: now(),
     });
     createMessagingGroup({

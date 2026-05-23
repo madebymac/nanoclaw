@@ -6,6 +6,24 @@ export interface AgentGroup {
   folder: string;
   /** @deprecated Use container_configs.provider instead. */
   agent_provider: string | null;
+  /** Null means "use the legacy env-var singleton OneCLI" — back-compat path. */
+  onecli_instance_id: string | null;
+  created_at: string;
+}
+
+export interface OneCLIInstance {
+  id: string;
+  name: string;
+  app_port: number;
+  gateway_port: number;
+  postgres_port: number;
+  install_dir: string;
+  api_url: string;
+  api_key: string | null;
+  ca_cert_path: string | null;
+  version: string | null;
+  health_status: string;
+  last_checked: string | null;
   created_at: string;
 }
 

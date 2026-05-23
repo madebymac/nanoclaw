@@ -55,6 +55,13 @@ registerResource({
         'Directory name under groups/ on the host. Must be unique. Contains CLAUDE.md, skills/, and container.json. Cannot be changed after creation.',
       required: true,
     },
+    {
+      name: 'onecli_instance_id',
+      type: 'string',
+      description:
+        'Pin this agent group to a specific OneCLI instance (sets which GitHub App\'s credentials the agent gets injected). NULL falls back to the legacy env-var singleton. Set to "" to detach.',
+      updatable: true,
+    },
     { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
   ],
   operations: { list: 'open', get: 'open', create: 'approval', update: 'approval', delete: 'approval' },

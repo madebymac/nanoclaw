@@ -74,6 +74,7 @@ function seedAgentGroup(id: string): void {
     name: id.toUpperCase(),
     folder: id,
     agent_provider: null,
+    onecli_instance_id: null,
     created_at: now(),
   });
 }

@@ -79,6 +79,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
     name,
     folder,
     agent_provider: null,
+    onecli_instance_id: null,
     created_at: now,
   };
   createAgentGroup(newGroup);

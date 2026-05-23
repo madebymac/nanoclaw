@@ -60,8 +60,22 @@ describe('destinations CLI custom ops project to inbound.db (#2465)', () => {
     const db = initTestDb();
     runMigrations(db);
 
-    createAgentGroup({ id: SOURCE, name: 'source', folder: 'source', agent_provider: null, created_at: now() });
-    createAgentGroup({ id: TARGET, name: 'target', folder: 'target', agent_provider: null, created_at: now() });
+    createAgentGroup({
+      id: SOURCE,
+      name: 'source',
+      folder: 'source',
+      agent_provider: null,
+      onecli_instance_id: null,
+      created_at: now(),
+    });
+    createAgentGroup({
+      id: TARGET,
+      name: 'target',
+      folder: 'target',
+      agent_provider: null,
+      onecli_instance_id: null,
+      created_at: now(),
+    });
 
     // Two active sessions for the source agent — both must receive the
     // projected destination row. Fixing only the "newest" session is a
