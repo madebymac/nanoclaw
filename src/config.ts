@@ -24,13 +24,15 @@ const HOME_DIR = process.env.HOME || os.homedir();
 // existing single-install layout at the project root is used unchanged.
 export const NCL_INSTANCE = (process.env.NCL_INSTANCE || '').trim();
 const INSTANCE_ROOT = NCL_INSTANCE ? path.resolve(PROJECT_ROOT, 'instances', NCL_INSTANCE) : PROJECT_ROOT;
-const ENV_FILE_PATH = NCL_INSTANCE ? path.join(INSTANCE_ROOT, '.env') : path.join(PROJECT_ROOT, '.env');
+// Exported so channel adapters and provider configs can read tokens from
+// the right .env (instances/<name>/.env when NCL_INSTANCE is set, root
+// .env otherwise). Anything that calls readEnvFile() with no path
+// argument will silently fall back to process.cwd() and clobber across
+// instances — always pass ENV_FILE_PATH instead.
+export const ENV_FILE_PATH = NCL_INSTANCE ? path.join(INSTANCE_ROOT, '.env') : path.join(PROJECT_ROOT, '.env');
 
 // Read config values from .env (falls back to process.env).
-const envConfig = readEnvFile(
-  ['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'ONECLI_URL', 'ONECLI_API_KEY', 'TZ'],
-  ENV_FILE_PATH,
-);
+const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'ONECLI_URL', 'ONECLI_API_KEY', 'TZ'], ENV_FILE_PATH);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
