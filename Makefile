@@ -138,7 +138,7 @@ install-onecli:
 	  echo "instances/$(NAME)/.env missing — run \`make new-instance NAME=$(NAME)\` first" >&2; \
 	  exit 1; \
 	fi
-	NCL_INSTANCE=$(NAME) pnpm exec tsx setup/onecli.ts
+	NCL_INSTANCE=$(NAME) pnpm exec tsx setup/index.ts --step onecli
 
 install-instance:
 	@if [ -z "$(NAME)" ]; then echo "usage: make install-instance NAME=<name>" >&2; exit 2; fi
