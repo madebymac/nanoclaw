@@ -1,8 +1,10 @@
 .PHONY: deploy build restart logs status install
 
-# Read INSTANCES from instances.conf. Absent or empty → single-install
-# mode (legacy behavior). Non-empty → multi-instance: every target
-# operates on every instance listed there.
+# Read INSTANCES from instances.conf — that's the source of truth for which
+# instances run on this host. Every target (deploy / install / restart /
+# logs / status) loops over them. If instances.conf is missing or
+# INSTANCES is empty, the targets collapse to legacy single-install
+# behaviour as a safety fallback — not the intended mode here.
 INSTANCES := $(shell . ./instances.conf 2>/dev/null && echo "$$INSTANCES")
 
 # Unit-name formula. MUST stay in lock-step with getInstallSlug() in
@@ -72,9 +74,10 @@ status:
 	  done; \
 	fi
 
-# Single-install mode: register the service unit (matches legacy behavior).
-# Multi-instance mode: for each instance, render its .env if missing,
-# install OneCLI if needed, then register the service unit.
+# For each instance listed in instances.conf: render its .env if missing,
+# install OneCLI on the auto-assigned port triple, register the systemd
+# unit. (Safety fallback when INSTANCES is empty: just register one
+# service unit — legacy single-install behaviour.)
 install:
 	@if [ -z "$(INSTANCES)" ]; then \
 	  pnpm exec tsx setup/index.ts --step service; \
