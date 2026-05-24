@@ -76,7 +76,13 @@ fi
 APP_PORT=$((ONECLI_BASE_PORT + INDEX * ONECLI_PORT_STRIDE))
 GATEWAY_PORT=$((APP_PORT + 1))
 POSTGRES_PORT=$((APP_PORT + 2))
-ONECLI_URL="http://127.0.0.1:${APP_PORT}"
+# Default to the docker bridge gateway IP — the OneCLI gateway compose
+# template binds to ${ONECLI_BIND_HOST:-172.17.0.1} for the same reason
+# (child containers spawned by nanoclaw need to reach the gateway, and
+# `127.0.0.1` from inside a child container is the container itself, not
+# the host). setup/onecli.ts overwrites this with the actual bind host
+# after the gateway is installed; this is just the first-render default.
+ONECLI_URL="http://172.17.0.1:${APP_PORT}"
 
 mkdir -p "$TARGET_DIR"
 
