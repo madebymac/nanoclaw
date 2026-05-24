@@ -10,13 +10,25 @@ UNIT := nanoclaw-v2-$(shell printf %s "$(CURDIR)" | sha1sum | cut -c1-8)
 # → instance = `review`).
 unit_for = nanoclaw-v2-$(shell printf %s "$(CURDIR):$(1)" | sha1sum | cut -c1-8)
 
+# Build-step lock. Self-upgrade ticks across instances all land in the same
+# window when upstream advances, and each fires `make deploy-<inst>` whose
+# build steps (git pull / pnpm install / pnpm build / ./container/build.sh)
+# write to shared paths (.git/index.lock, node_modules/, dist/, the image
+# tag). flock serializes them so the second tick becomes a near-no-op and
+# its `systemctl restart` picks up the freshly built artifacts. Scoped to
+# CURDIR so two unrelated nanoclaw installs on the same host don't block
+# each other. Requires util-linux flock; already a hard dep of the
+# Linux-only self-upgrade path (see src/self-upgrade.ts).
+BUILD_LOCK := /tmp/nanoclaw-build-$(shell printf %s "$(CURDIR)" | sha1sum | cut -c1-8).lock
+
 # ----- single-install targets (unchanged) -----------------------------------
 
 deploy:
-	git pull --ff-only
-	pnpm install --frozen-lockfile
-	pnpm build
-	./container/build.sh
+	flock $(BUILD_LOCK) -c '\
+	  git pull --ff-only && \
+	  pnpm install --frozen-lockfile && \
+	  pnpm build && \
+	  ./container/build.sh'
 	systemctl --user restart $(UNIT)
 
 build:
@@ -59,10 +71,11 @@ install:
 INSTANCES ?=
 
 build-shared:
-	git pull --ff-only
-	pnpm install --frozen-lockfile
-	pnpm build
-	./container/build.sh
+	flock $(BUILD_LOCK) -c '\
+	  git pull --ff-only && \
+	  pnpm install --frozen-lockfile && \
+	  pnpm build && \
+	  ./container/build.sh'
 
 deploy-all: build-shared
 	@if [ -z "$(INSTANCES)" ]; then \
