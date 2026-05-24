@@ -7,6 +7,15 @@ import { isValidTimezone } from './timezone.js';
 
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();
+// Loud-fail if someone launches the host (or a setup step) from inside an
+// instance dir — INSTANCE_ROOT below would otherwise resolve to
+// instances/<name>/instances/<name>/, silently shifting the whole layout.
+if (PROJECT_ROOT.includes(`${path.sep}instances${path.sep}`)) {
+  throw new Error(
+    `Refusing to start: process.cwd() (${PROJECT_ROOT}) is inside instances/. ` +
+      `Always launch from the repo root with NCL_INSTANCE=<name> in the environment.`,
+  );
+}
 const HOME_DIR = process.env.HOME || os.homedir();
 
 // Multi-instance: NCL_INSTANCE namespaces per-instance state under

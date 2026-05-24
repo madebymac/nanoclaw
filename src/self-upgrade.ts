@@ -163,7 +163,15 @@ async function gitText(args: string[], cwd: string): Promise<string | null> {
 }
 
 async function triggerDeploy(projectRoot: string): Promise<void> {
+  const instance = (process.env.NCL_INSTANCE || '').trim();
+  // Per-instance unit so two instances upgrading concurrently don't
+  // collide on the systemd-run lock. getSystemdUnit() picks up
+  // NCL_INSTANCE automatically.
   const unit = `${getSystemdUnit(projectRoot)}-upgrade`;
+  // When running as an instance, drive the matching Makefile target so the
+  // final `systemctl --user restart` hits the right unit. Default `make
+  // deploy` restarts the single-install unit only.
+  const deployCmd = instance ? `make deploy-${instance}` : 'make deploy';
 
   // A previous deploy that exited non-zero leaves a stale unit in `failed`
   // state under the same name, which would block subsequent `systemd-run
@@ -187,7 +195,7 @@ async function triggerDeploy(projectRoot: string): Promise<void> {
       `--working-directory=${projectRoot}`,
       '/bin/bash',
       '-lc',
-      'make deploy',
+      deployCmd,
     ],
     { timeoutMs: SYSTEMD_RUN_TIMEOUT_MS },
   );

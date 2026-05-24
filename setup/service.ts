@@ -316,7 +316,7 @@ function setupSystemd(
       log.warn(
         'systemd user session not available — falling back to nohup wrapper',
       );
-      setupNohupFallback(projectRoot, nodePath, homeDir);
+      setupNohupFallback(projectRoot, nodePath, homeDir, instance, stateDir);
       return;
     }
     const unitDir = path.join(homeDir, '.config', 'systemd', 'user');
@@ -459,7 +459,7 @@ function setupNohupFallback(
 
   const lines = [
     '#!/bin/bash',
-    '# start-nanoclaw.sh — Start NanoClaw without systemd',
+    `# ${wrapperName} — Start NanoClaw${instance ? ` (instance: ${instance})` : ''} without systemd`,
     `# To stop: kill \\$(cat ${pidFile})`,
     '',
     'set -euo pipefail',
