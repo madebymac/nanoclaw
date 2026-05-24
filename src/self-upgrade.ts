@@ -163,15 +163,18 @@ async function gitText(args: string[], cwd: string): Promise<string | null> {
 }
 
 async function triggerDeploy(projectRoot: string): Promise<void> {
-  const instance = (process.env.NCL_INSTANCE || '').trim();
-  // Per-instance unit so two instances upgrading concurrently don't
-  // collide on the systemd-run lock. getSystemdUnit() picks up
-  // NCL_INSTANCE automatically.
+  // Per-instance upgrade unit name so two instances racing to fire an
+  // upgrade don't collide on the systemd-run --unit lock. getSystemdUnit()
+  // reads NCL_INSTANCE itself so single- vs multi-install resolves
+  // correctly without explicit branching here.
   const unit = `${getSystemdUnit(projectRoot)}-upgrade`;
-  // When running as an instance, drive the matching Makefile target so the
-  // final `systemctl --user restart` hits the right unit. Default `make
-  // deploy` restarts the single-install unit only.
-  const deployCmd = instance ? `make deploy-${instance}` : 'make deploy';
+  // `make deploy` is always the right target. Single-install: pulls,
+  // builds, restarts the one unit. Multi-instance: pulls, builds (flock
+  // serializes concurrent ticks across instances), then restarts every
+  // unit listed in instances.conf. The N instance hosts will all try to
+  // fire this on each upstream advance; flock + the empty-pull no-op
+  // handle the race.
+  const deployCmd = 'make deploy';
 
   // A previous deploy that exited non-zero leaves a stale unit in `failed`
   // state under the same name, which would block subsequent `systemd-run

@@ -85,10 +85,12 @@ Created $TARGET
   postgres port: $POSTGRES_PORT
   ONECLI_URL:    $ONECLI_URL
 
-Next: run \`make install-instance NAME=$NAME\` to install OneCLI and the
-systemd unit. Channel tokens (TELEGRAM_BOT_TOKEN etc.) don't need to be
-hand-edited here — install channels via /add-telegram, /add-slack, etc.
-from a Claude Code session with NCL_INSTANCE=$NAME set, exactly like
+Channel tokens (TELEGRAM_BOT_TOKEN etc.) don't need to be hand-edited
+here — install channels via /add-telegram, /add-slack, etc. from a
+Claude Code session with NCL_INSTANCE=$NAME set, exactly like
 single-install. The set-env step is instance-aware and will write tokens
 to $TARGET for you.
+
+(This script is normally invoked by \`make install\`. You shouldn't need
+to call it directly.)
 EOF
