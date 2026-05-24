@@ -506,10 +506,20 @@ export async function run(args: string[]): Promise<void> {
   // precheck skips this case when --reuse/--remote-url is set; here it's
   // genuinely missing config.
   if (ctx.name && ctx.appPort === null) {
-    log.error(
-      `Could not parse ONECLI_URL port from ${ctx.envFile}. ` +
-        `Run \`make new-instance NAME=${ctx.name}\` first to generate the per-instance .env.`,
-    );
+    // Distinguish "file missing entirely" from "file present but
+    // ONECLI_URL has no port" — different fix in each case.
+    if (!fs.existsSync(ctx.envFile)) {
+      log.error(
+        `Per-instance .env not found at ${ctx.envFile}. ` +
+          `Add "${ctx.name}" to INSTANCES in instances.conf and run \`make install\`, ` +
+          `or generate just this one with \`scripts/render-instance-env.sh ${ctx.name}\`.`,
+      );
+    } else {
+      log.error(
+        `ONECLI_URL in ${ctx.envFile} has no port — local install needs a localhost URL with an explicit port (e.g. http://127.0.0.1:10354). ` +
+          `If you meant to target a hosted remote gateway, re-run with \`--reuse\` or \`--remote-url ${process.env.ONECLI_URL || '<url>'}\` instead.`,
+      );
+    }
     process.exit(1);
   }
   log.info('Installing OneCLI gateway and CLI');

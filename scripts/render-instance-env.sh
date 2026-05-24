@@ -76,12 +76,12 @@ if [ -e "$TARGET" ]; then
   exit 1
 fi
 
-# Substitute placeholders. Add new __PLACEHOLDER__ keys here if the template grows.
+# Substitute placeholders. Currently only __ONECLI_URL__ is used by the
+# template; if a future template needs the individual ports
+# (__ONECLI_APP_PORT__, __ONECLI_GATEWAY_PORT__, __ONECLI_POSTGRES_PORT__),
+# add the matching `-e` line back here.
 sed \
   -e "s|__ONECLI_URL__|${ONECLI_URL}|g" \
-  -e "s|__ONECLI_APP_PORT__|${APP_PORT}|g" \
-  -e "s|__ONECLI_GATEWAY_PORT__|${GATEWAY_PORT}|g" \
-  -e "s|__ONECLI_POSTGRES_PORT__|${POSTGRES_PORT}|g" \
   "$TEMPLATE" > "$TARGET"
 
 cat <<EOF
