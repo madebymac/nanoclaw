@@ -20,48 +20,52 @@ guard-instances:
 # getInstallSlug() in src/install-slug.ts: sha1("<CWD>:<name>")[:8].
 
 # Build-step lock. Self-upgrade ticks from each instance's host all fire
-# `make deploy`. flock serializes the whole deploy phase (bootstrap +
-# build + restart) against the shared .git/index.lock, node_modules/,
-# dist/, image tag, OneCLI compose project, and systemd unit registration.
-# The loser blocks until the first finishes, then no-ops through every
-# step (env exists → skip; OneCLI installed → skip; unit registered →
-# skip; git already up-to-date → skip; pnpm install satisfied → no-op;
-# build no-op) and proceeds straight to the restart. Scoped to CURDIR so
-# two unrelated nanoclaw checkouts on the same host don't block each
-# other.
+# `make deploy`. flock serializes the whole deploy (pull + install +
+# bootstrap + build + restart) against shared mutable state: .git/index,
+# node_modules/, dist/, image tag, OneCLI compose projects, and systemd
+# user units. The loser blocks until the winner finishes, then no-ops
+# through every idempotent step (git already up-to-date → no commits;
+# pnpm install satisfied → no-op; env files exist → skip; OneCLI compose
+# project already running → skip; systemd unit registered → skip; build
+# no-op) and proceeds to its restart. Scoped to CURDIR so two unrelated
+# nanoclaw checkouts on the same host don't block each other.
 BUILD_LOCK := /tmp/nanoclaw-build-$(shell printf %s "$(CURDIR)" | sha1sum | cut -c1-8).lock
 
 # `make deploy` is the only command an operator (or the self-upgrade
-# poller) ever needs. It is self-bootstrapping and idempotent:
+# poller) ever needs. It is self-bootstrapping and idempotent. Ordering
+# matters — `pnpm install` MUST run before any `pnpm exec tsx ...` so
+# that `tsx` (a devDependency) is on disk when the bootstrap steps
+# invoke it:
 #
-#   For each instance in INSTANCES (from instances.conf):
-#     1. Render instances/<name>/.env if missing.
-#     2. Install OneCLI under ~/.onecli-<name>/ if missing.
-#     3. Register the per-instance systemd user unit if missing.
-#   Then once:
-#     4. git pull --ff-only
-#     5. pnpm install --frozen-lockfile
-#     6. pnpm build
-#     7. ./container/build.sh
-#   Finally, restart every instance unit (tolerant — a single failed
-#   restart logs WARN, the loop continues, deploy exits non-zero overall).
+#   1. git pull --ff-only
+#   2. pnpm install --frozen-lockfile
+#   3. For each instance in INSTANCES (from instances.conf):
+#        a. Render instances/<name>/.env if missing.
+#        b. `docker compose -p onecli-<name> up -d` if not already running.
+#        c. Register the per-instance systemd user unit if missing.
+#   4. pnpm build
+#   5. ./container/build.sh
+#   6. Restart every instance unit (tolerant — a single failed restart
+#      logs WARN, the loop continues, deploy exits non-zero overall).
 #
-# Steps 1-3 are idempotent file-presence checks, so running deploy on a
-# fully-installed host is a normal build + restart. Running it on a
-# brand-new host (or after `git pull` brings in a new instance name) just
-# installs the missing bits inline. Self-upgrade alone is enough to take
-# a fresh instance from "name added to instances.conf" to running.
+# Steps 3a-c are idempotent presence checks, so deploy on a fully-
+# installed host is just pull + install + build + restart. On a brand-
+# new host (or after adding a name to instances.conf) the missing bits
+# install inline. Self-upgrade alone is enough to take a fresh instance
+# from "name added to instances.conf" to running.
 deploy: guard-instances
 	flock $(BUILD_LOCK) -c '\
 	  set -e; \
+	  git pull --ff-only; \
+	  pnpm install --frozen-lockfile; \
 	  for inst in $(INSTANCES); do \
 	    unit=nanoclaw-v2-$$(printf %s "$(CURDIR):$$inst" | sha1sum | cut -c1-8); \
 	    if [ ! -f instances/$$inst/.env ]; then \
 	      echo "==> [$$inst] rendering instances/$$inst/.env"; \
 	      scripts/render-instance-env.sh $$inst; \
 	    fi; \
-	    if [ ! -d $$HOME/.onecli-$$inst ]; then \
-	      echo "==> [$$inst] installing OneCLI"; \
+	    if ! docker compose -p onecli-$$inst ps --status running --quiet 2>/dev/null | grep -q .; then \
+	      echo "==> [$$inst] bringing up OneCLI gateway"; \
 	      NCL_INSTANCE=$$inst pnpm exec tsx setup/index.ts --step onecli; \
 	    fi; \
 	    if [ ! -f $$HOME/.config/systemd/user/$$unit.service ]; then \
@@ -69,15 +73,14 @@ deploy: guard-instances
 	      NCL_INSTANCE=$$inst pnpm exec tsx setup/index.ts --step service; \
 	    fi; \
 	  done; \
-	  git pull --ff-only && \
-	  pnpm install --frozen-lockfile && \
-	  pnpm build && \
-	  ./container/build.sh'
-	@rc=0; for inst in $(INSTANCES); do \
-	  unit=nanoclaw-v2-$$(printf %s "$(CURDIR):$$inst" | sha1sum | cut -c1-8); \
-	  echo "Restarting $$inst ($$unit)"; \
-	  systemctl --user restart $$unit || { echo "  WARN: $$inst restart failed" >&2; rc=1; }; \
-	done; exit $$rc
+	  pnpm build; \
+	  ./container/build.sh; \
+	  rc=0; for inst in $(INSTANCES); do \
+	    unit=nanoclaw-v2-$$(printf %s "$(CURDIR):$$inst" | sha1sum | cut -c1-8); \
+	    echo "Restarting $$inst ($$unit)"; \
+	    systemctl --user restart $$unit || { echo "  WARN: $$inst restart failed" >&2; rc=1; }; \
+	  done; \
+	  exit $$rc'
 
 build:
 	pnpm build

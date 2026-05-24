@@ -177,65 +177,41 @@ function installOnecliCliOnly(): { stdout: string; ok: boolean } {
   return { stdout: upstream.stdout + (upstream.stderr ?? '') + '\n' + fallback.stdout, ok: fallback.ok };
 }
 
-// Remove containers in the configured compose project whose service name
-// isn't in the v2 set. Pre-v2 OneCLI used service "app" (container
-// onecli-app-1); v2 uses "onecli". Compose flags the old container as an
-// orphan but won't stop it without --remove-orphans, leaving the app port
-// bound and crashing the new bring-up. Filed upstream; this is the
-// downstream workaround.
-function removeLegacyOnecliContainers(composeProject: string): string {
-  const out: string[] = [];
-  let list = '';
-  try {
-    list = execSync(
-      `docker ps -a --filter "label=com.docker.compose.project=${composeProject}" --format '{{.Names}}|{{.Label "com.docker.compose.service"}}'`,
-      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim();
-  } catch {
-    return '';
-  }
-  if (!list) return '';
-  const v2Services = new Set(['onecli', 'postgres']);
-  for (const line of list.split('\n')) {
-    const [name, service] = line.split('|');
-    if (!name || !service || v2Services.has(service)) continue;
-    out.push(`Removing legacy OneCLI container: ${name} (service=${service})`);
-    try {
-      execSync(`docker rm -f ${JSON.stringify(name)}`, { stdio: ['ignore', 'pipe', 'pipe'] });
-    } catch (err) {
-      out.push(`  rm failed (continuing): ${(err as Error).message}`);
-    }
-  }
-  return out.join('\n');
-}
-
 function installOnecli(ctx: ReturnType<typeof instanceContext>): { stdout: string; ok: boolean } {
   let stdout = '';
 
-  const cleanup = removeLegacyOnecliContainers(ctx.composeProject);
-  if (cleanup) stdout += cleanup + '\n';
-
-  // Gateway install (docker-compose based, no rate-limit concerns).
-  // For multi-instance: set COMPOSE_PROJECT_NAME so the upstream installer's
-  // `docker compose up` lands under our per-instance project, and pass a
-  // speculative bundle of port/dir override env vars in case the installer
-  // honors them. Single-install path (NCL_INSTANCE unset) omits the exports
-  // entirely so behavior is bit-identical to before.
-  const overrideExports = buildInstallerExports(ctx);
-  const gw = runInstall(
-    `${overrideExports}export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl -fsSL onecli.sh/install | sh`,
-  );
+  // Gateway install — bypass the upstream onecli.sh installer entirely.
+  //
+  // Why bypass: the upstream installer ships a compose file with hardcoded
+  // `name: onecli` + `container_name: onecli`. Compose treats `name:` as
+  // authoritative over the `-p` flag, so two installs on one host always
+  // collide on a single project. We need one gateway per nanoclaw instance
+  // (strong credential + failure isolation), so we ship our own compose
+  // template (setup/onecli/docker-compose.yml.template) with those fields
+  // removed and bring it up directly under -p onecli-<inst>.
+  //
+  // Per-instance compose dir at ctx.installDir (e.g. ~/.onecli-review/):
+  //   docker-compose.yml  — rendered from the template
+  //   .env                — port triple, bind host, version, NEXTAUTH_SECRET
+  // pgdata + app-data live in named volumes scoped to project onecli-<inst>.
+  const gw = installInstanceGateway(ctx);
   stdout += gw.stdout;
   if (!gw.ok) {
-    log.error('OneCLI gateway install failed', { stderr: gw.stderr });
+    log.error('OneCLI gateway compose-up failed', { stderr: gw.stderr });
     return { stdout: stdout + (gw.stderr ?? ''), ok: false };
   }
 
-  // CLI install. The upstream script calls the GitHub releases API
-  // (api.github.com) to resolve the latest tag — which 403s anonymous
-  // callers after 60 requests/hour per IP. Try upstream first; on failure
-  // resolve the version ourselves (via HTTP redirect, which isn't
-  // API-throttled) and download the release archive directly.
+  // CLI binary install. Host-global, not per-instance — once it's on
+  // PATH, every instance uses the same binary. Skip if already present.
+  if (onecliVersion()) {
+    stdout += `OneCLI CLI already installed (${onecliVersion()}); skipping\n`;
+    return { stdout, ok: true };
+  }
+
+  // The upstream CLI installer calls api.github.com to resolve the latest
+  // tag — 403s anonymous callers after 60 requests/hour. Try upstream first;
+  // on failure resolve the version ourselves via HTTP redirect (not API-
+  // throttled) and download the release archive directly.
   const upstream = runInstall('curl -fsSL onecli.sh/cli/install | sh');
   stdout += upstream.stdout;
   if (upstream.ok) return { stdout, ok: true };
@@ -255,25 +231,76 @@ function installOnecli(ctx: ReturnType<typeof instanceContext>): { stdout: strin
 }
 
 /**
- * Build the `export FOO=bar && ` prefix for the upstream installer invocation.
- * For single-install (ctx.name === '') returns '' so the curl-piped sh sees
- * exactly the environment it always saw. For per-instance installs, exports
- * COMPOSE_PROJECT_NAME (standard docker-compose env — almost certainly
- * honored) plus a best-effort bundle of port/dir override names. If the
- * upstream installer ignores the port overrides, the gateway will land on
- * its default port and the subsequent health/URL check will fail visibly
- * rather than silently misbehave.
+ * Default docker bridge gateway IP on Linux. Used as the bind host so
+ * containers spawned by nanoclaw can reach the gateway (`127.0.0.1` from
+ * inside a child container would be the container itself, not the host).
+ * Operators with a non-default docker network can override by setting
+ * ONECLI_BIND_HOST in their instance .env before first install.
  */
-function buildInstallerExports(ctx: ReturnType<typeof instanceContext>): string {
-  if (!ctx.name) return '';
-  const parts: string[] = [`COMPOSE_PROJECT_NAME=${ctx.composeProject}`, `ONECLI_HOME=${ctx.installDir}`];
-  if (ctx.appPort !== null) {
-    parts.push(`ONECLI_APP_PORT=${ctx.appPort}`);
-    parts.push(`ONECLI_PORT=${ctx.appPort}`);
+const DEFAULT_BIND_HOST = '172.17.0.1';
+
+/**
+ * Render the per-instance compose file + .env into ctx.installDir, then
+ * `docker compose -p <project> up -d`. Idempotent: existing volumes /
+ * containers are reused; subsequent runs are effectively a no-op when
+ * everything is already running.
+ *
+ * NEXTAUTH_SECRET is generated once and persisted in the per-instance .env
+ * so restarts don't invalidate sessions. POSTGRES_PASSWORD stays default
+ * — postgres is project-scoped (volume + network), so the default
+ * credential isn't shared across instances.
+ */
+function installInstanceGateway(
+  ctx: ReturnType<typeof instanceContext>,
+): { stdout: string; stderr?: string; ok: boolean } {
+  if (!ctx.name || ctx.appPort === null || ctx.gatewayPort === null || ctx.postgresPort === null) {
+    return {
+      stdout: '',
+      stderr: 'installInstanceGateway requires NCL_INSTANCE + a parsable per-instance .env',
+      ok: false,
+    };
   }
-  if (ctx.gatewayPort !== null) parts.push(`ONECLI_GATEWAY_PORT=${ctx.gatewayPort}`);
-  if (ctx.postgresPort !== null) parts.push(`ONECLI_POSTGRES_PORT=${ctx.postgresPort}`);
-  return parts.map((p) => `export ${p}`).join(' && ') + ' && ';
+
+  fs.mkdirSync(ctx.installDir, { recursive: true });
+
+  // Copy the template into the per-instance dir. Done unconditionally so
+  // template fixes propagate on the next deploy tick.
+  const templatePath = path.join(process.cwd(), 'setup', 'onecli', 'docker-compose.yml.template');
+  const composePath = path.join(ctx.installDir, 'docker-compose.yml');
+  fs.copyFileSync(templatePath, composePath);
+
+  // Per-instance .env. NEXTAUTH_SECRET persists across runs — only
+  // generated on first install.
+  const envPath = path.join(ctx.installDir, '.env');
+  const existing = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
+  const persistedSecret = /^NEXTAUTH_SECRET=(.+)$/m.exec(existing)?.[1];
+  const nextauthSecret = persistedSecret || randomSecret();
+  const bindHost = /^ONECLI_BIND_HOST=(.+)$/m.exec(existing)?.[1] || DEFAULT_BIND_HOST;
+
+  const envLines = [
+    `# Auto-generated by setup/onecli.ts. Edit at your own risk; the deploy`,
+    `# step re-renders this file on every tick except for the values below`,
+    `# (NEXTAUTH_SECRET, ONECLI_BIND_HOST) which are persisted.`,
+    `ONECLI_VERSION=${ONECLI_GATEWAY_VERSION}`,
+    `ONECLI_BIND_HOST=${bindHost}`,
+    `ONECLI_APP_PORT=${ctx.appPort}`,
+    `ONECLI_GATEWAY_PORT=${ctx.gatewayPort}`,
+    `POSTGRES_PORT=${ctx.postgresPort}`,
+    `NEXTAUTH_SECRET=${nextauthSecret}`,
+    '',
+  ];
+  fs.writeFileSync(envPath, envLines.join('\n'), { mode: 0o600 });
+
+  const cmd = `docker compose --project-directory ${JSON.stringify(ctx.installDir)} -p ${JSON.stringify(ctx.composeProject)} up -d`;
+  return runInstall(cmd);
+}
+
+function randomSecret(): string {
+  // 32 random bytes, base64url-encoded. Enough entropy for NextAuth's
+  // signing secret; matches the upstream installer's openssl rand approach.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { randomBytes } = require('crypto') as typeof import('crypto');
+  return randomBytes(32).toString('base64url');
 }
 
 function runInstall(cmd: string): { stdout: string; stderr?: string; ok: boolean } {
@@ -582,8 +609,8 @@ export async function run(args: string[]): Promise<void> {
   if (ctx.name && !healthy) {
     log.error(
       `OneCLI gateway for instance "${ctx.name}" is not responding at ${url}. ` +
-        `The upstream installer may have ignored ONECLI_APP_PORT/ONECLI_PORT overrides. ` +
-        `Check 'docker compose -p ${ctx.composeProject} ps' and 'docker compose -p ${ctx.composeProject} logs' on the host.`,
+        `Check 'docker compose --project-directory ${ctx.installDir} -p ${ctx.composeProject} ps' ` +
+        `and 'docker compose --project-directory ${ctx.installDir} -p ${ctx.composeProject} logs' on the host.`,
     );
   }
 

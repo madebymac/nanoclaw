@@ -1,0 +1,75 @@
+# Per-instance OneCLI gateway compose file.
+#
+# Rendered into ~/.onecli-<instance>/docker-compose.yml by setup/onecli.ts
+# and brought up with `docker compose --project-directory ~/.onecli-<instance>
+# -p onecli-<instance> up -d`.
+#
+# Differences from the upstream onecli.sh installer's compose file:
+#   - No top-level `name:` field. The upstream file pins `name: onecli`,
+#     which compose treats as authoritative over the `-p` flag — that's
+#     what forced every instance install to collide on a single project.
+#     We control project name via `-p` instead so each instance gets
+#     its own (onecli-review, onecli-general, etc.).
+#   - No `container_name: onecli` on the onecli service. With it,
+#     compose would refuse to create a second container by the same
+#     name across projects. Without it, compose auto-names per project
+#     (onecli-review-onecli-1, onecli-general-onecli-1, etc.).
+#
+# Port + bind-address + version overrides come from the per-instance
+# .env that lives in the same directory and is auto-loaded by compose:
+#   ONECLI_VERSION       image tag for ghcr.io/onecli/onecli (pin this).
+#   ONECLI_APP_PORT      host port for the web/API (default 10254).
+#   ONECLI_GATEWAY_PORT  host port for the gateway (default 10255).
+#   POSTGRES_PORT        host port for postgres (default 5432).
+#   ONECLI_BIND_HOST     host address to bind to (default 127.0.0.1).
+#   POSTGRES_USER/PASSWORD/DB defaults are fine; override if you need to.
+#   NEXTAUTH_SECRET      auth secret for the gateway. Generated once
+#                        per instance by setup/onecli.ts at first install.
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-onecli}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-onecli}
+      POSTGRES_DB: ${POSTGRES_DB:-onecli}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    ports:
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-onecli}"]
+      interval: 5s
+      timeout: 3s
+      start_period: 15s
+      retries: 10
+    networks:
+      - onecli
+
+  onecli:
+    image: ghcr.io/onecli/onecli:${ONECLI_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}:10254"
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}:10255"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
+      APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}
+      GATEWAY_API_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}
+    volumes:
+      - app-data:/app/data
+    networks:
+      - onecli
+
+volumes:
+  pgdata:
+  app-data:
+
+networks:
+  onecli:
+    driver: bridge
