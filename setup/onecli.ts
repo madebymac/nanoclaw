@@ -390,7 +390,12 @@ export async function run(args: string[]): Promise<void> {
       installDir: ctx.installDir,
       appPort: ctx.appPort,
     });
-    if (ctx.appPort === null) {
+    // appPort is only needed for the local-install path (installOnecli).
+    // --reuse and --remote-url legitimately point at gateways without a
+    // port in the URL (e.g. https://onecli.example.com), so parseEnvPort
+    // returns null — don't abort those flows here. The local-install
+    // branch below re-checks and bails with the same message if missing.
+    if (ctx.appPort === null && !reuse && !remoteUrl) {
       log.error(
         `Could not parse ONECLI_URL port from ${ctx.envFile}. ` +
           `Run \`make new-instance NAME=${ctx.name}\` first to generate the per-instance .env.`,
@@ -493,6 +498,16 @@ export async function run(args: string[]): Promise<void> {
     return;
   }
 
+  // Local-install path: per-instance ports are required. The earlier
+  // precheck skips this case when --reuse/--remote-url is set; here it's
+  // genuinely missing config.
+  if (ctx.name && ctx.appPort === null) {
+    log.error(
+      `Could not parse ONECLI_URL port from ${ctx.envFile}. ` +
+        `Run \`make new-instance NAME=${ctx.name}\` first to generate the per-instance .env.`,
+    );
+    process.exit(1);
+  }
   log.info('Installing OneCLI gateway and CLI');
   const res = installOnecli(ctx);
   if (!res.ok) {

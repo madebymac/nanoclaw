@@ -36,11 +36,18 @@ describe('install-slug instance discriminator', () => {
     expect(getLaunchdLabel(root, '')).toBe(getLaunchdLabel(root));
   });
 
-  it('bash Makefile slug formula matches the TS helper', () => {
-    // The Makefile derives per-instance units as:
-    //   nanoclaw-v2-$(sha1sum <<< "$CURDIR:$instance" | cut -c1-8)
-    // TS does the same via createHash. Pin the format so a Makefile edit
-    // that drops the colon or changes the input order fails here.
-    expect(getInstallSlug('/abs', 'foo')).toMatch(/^[0-9a-f]{8}$/);
+  it('bash Makefile slug formula matches the TS helper (hash pinned)', () => {
+    // Cross-language contract: the Makefile, install-slug.sh, and this TS
+    // helper must all compute sha1("<projectRoot>:<instance>")[:8] (or
+    // sha1(projectRoot)[:8] when instance is empty) for the SAME 8 hex
+    // chars. Hardcoded reference values below were generated via:
+    //   printf '/abs:foo' | sha1sum | cut -c1-8   →  6d93cda5
+    //   printf '/abs'     | sha1sum | cut -c1-8   →  f2be0907
+    // If the TS side ever changes input formatting (separator, order,
+    // trailing newline) these will trip — and so will the bash/Makefile
+    // mirror, since their reference hashes were computed the same way.
+    expect(getInstallSlug('/abs', 'foo')).toBe('6d93cda5');
+    expect(getInstallSlug('/abs', '')).toBe('f2be0907');
+    expect(getInstallSlug('/abs')).toBe('f2be0907');
   });
 });
