@@ -28,13 +28,21 @@ const LOCAL_BIN = path.join(os.homedir(), '.local', 'bin');
  * from inside a child container is the container itself, not the host.
  * Operators with a non-default docker network can override by setting
  * ONECLI_BIND_HOST in their per-instance OneCLI .env before first install.
+ *
+ * Linux-only default. Docker Desktop on macOS/WSL doesn't expose a host
+ * IP at 172.17.0.1 (host-gateway lives at host.docker.internal there), so
+ * dev-mode operators running the instance flow off-Pi must override
+ * ONECLI_BIND_HOST themselves.
  */
 const DEFAULT_BIND_HOST = '172.17.0.1';
 
 function readPersistedBindHost(installDir: string): string {
   try {
     const content = fs.readFileSync(path.join(installDir, '.env'), 'utf-8');
-    const m = /^ONECLI_BIND_HOST=(.+)$/m.exec(content);
+    // Allow optional surrounding quotes and a trailing `# comment`; stop
+    // at whitespace. Previously matched `.+` which captured the quotes
+    // and any trailing comment as part of the host string.
+    const m = /^ONECLI_BIND_HOST=["']?([^"'#\s]+)/m.exec(content);
     if (m) return m[1].trim();
   } catch {
     // File doesn't exist yet (first install) — fall through to default.
