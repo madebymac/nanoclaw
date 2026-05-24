@@ -46,6 +46,16 @@ fi
 # shellcheck source=/dev/null
 . "$CONF"
 
+# Validate required keys are present in instances.conf so a malformed file
+# produces a clear error instead of `set -u` bash trace at first use below.
+for required in INSTANCES ONECLI_BASE_PORT ONECLI_PORT_STRIDE; do
+  if [ -z "${!required:-}" ]; then
+    echo "error: $CONF is missing required key '$required'" >&2
+    echo "       expected: INSTANCES=\"name1 name2\" ONECLI_BASE_PORT=<int> ONECLI_PORT_STRIDE=<int>" >&2
+    exit 1
+  fi
+done
+
 # Find the instance index in INSTANCES (0-based).
 INDEX=-1
 i=0

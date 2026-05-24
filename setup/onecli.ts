@@ -402,7 +402,7 @@ export async function run(args: string[]): Promise<void> {
     if (ctx.appPort === null && !reuse && !remoteUrl) {
       log.error(
         `Could not parse ONECLI_URL port from ${ctx.envFile}. ` +
-          `Run \`make new-instance NAME=${ctx.name}\` first to generate the per-instance .env.`,
+          `Run \`scripts/render-instance-env.sh ${ctx.name}\` to generate the per-instance .env, then re-run \`make install\`.`,
       );
       process.exit(1);
     }
