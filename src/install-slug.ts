@@ -15,9 +15,13 @@
  */
 import { createHash } from 'crypto';
 
+import { readInstanceName } from './instance-name.js';
+
 function resolveInstance(instance?: string): string {
   if (instance !== undefined) return instance;
-  return (process.env.NCL_INSTANCE || '').trim();
+  // Reads + validates process.env.NCL_INSTANCE. Throws on invalid values
+  // so they can't reach the slug hash, plist label, or systemd unit name.
+  return readInstanceName();
 }
 
 export function getInstallSlug(projectRoot: string = process.cwd(), instance?: string): string {

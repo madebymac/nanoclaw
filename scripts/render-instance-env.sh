@@ -20,6 +20,13 @@ if [ $# -ne 1 ]; then
 fi
 
 NAME="$1"
+# Mirror of isValidInstanceName() in src/instance-name.ts. Keep the regex
+# in sync — both layers must accept exactly the same charset so a name
+# that passes the bash script can't fail the TS validator (or vice versa).
+if ! printf '%s' "$NAME" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,31}$'; then
+  echo "error: instance name '$NAME' invalid (must match [a-z0-9][a-z0-9_-]{0,31})" >&2
+  exit 1
+fi
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd)"
 CONF="$REPO_ROOT/instances.conf"

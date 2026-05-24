@@ -2,6 +2,7 @@ import os from 'os';
 import path from 'path';
 
 import { readEnvFile } from './env.js';
+import { readInstanceName } from './instance-name.js';
 import { getContainerImageBase, getDefaultContainerImage, getInstallSlug } from './install-slug.js';
 import { isValidTimezone } from './timezone.js';
 
@@ -22,8 +23,18 @@ const HOME_DIR = process.env.HOME || os.homedir();
 // instances/<name>/ so one checkout can run two distinct hosts (separate DBs,
 // separate groups, separate OneCLI, distinct systemd units). When unset, the
 // existing single-install layout at the project root is used unchanged.
-export const NCL_INSTANCE = (process.env.NCL_INSTANCE || '').trim();
+export const NCL_INSTANCE = readInstanceName();
 const INSTANCE_ROOT = NCL_INSTANCE ? path.resolve(PROJECT_ROOT, 'instances', NCL_INSTANCE) : PROJECT_ROOT;
+// Belt-and-braces: even though readInstanceName() rejects '..' / '/', assert
+// the resolved instance dir is still inside instances/ before any path
+// derived from it (STORE_DIR, GROUPS_DIR, DATA_DIR, ENV_FILE_PATH) leaves
+// this module.
+if (NCL_INSTANCE) {
+  const expectedPrefix = path.resolve(PROJECT_ROOT, 'instances') + path.sep;
+  if (!INSTANCE_ROOT.startsWith(expectedPrefix)) {
+    throw new Error(`INSTANCE_ROOT (${INSTANCE_ROOT}) resolved outside ${expectedPrefix} — refusing to start.`);
+  }
+}
 // Exported so channel adapters and provider configs can read tokens from
 // the right .env (instances/<name>/.env when NCL_INSTANCE is set, root
 // .env otherwise). Anything that calls readEnvFile() with no path

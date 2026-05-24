@@ -15,6 +15,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { readInstanceName } from '../src/instance-name.js';
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
 
@@ -41,7 +42,8 @@ export async function run(args: string[]): Promise<void> {
   // Multi-instance: route writes to instances/<name>/.env when NCL_INSTANCE
   // is set, so channel-install flows land tokens in the per-instance file
   // that the host actually reads (matches src/config.ts ENV_FILE_PATH).
-  const instance = (process.env.NCL_INSTANCE || '').trim();
+  // Validated at ingestion so stateDir below can't escape instances/.
+  const instance = readInstanceName();
   const stateDir = instance ? path.join(projectRoot, 'instances', instance) : projectRoot;
   const envFile = path.join(stateDir, '.env');
   fs.mkdirSync(stateDir, { recursive: true });

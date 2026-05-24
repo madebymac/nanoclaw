@@ -9,6 +9,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { readInstanceName } from '../src/instance-name.js';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
@@ -28,7 +29,10 @@ export async function run(_args: string[]): Promise<void> {
   const platform = getPlatform();
   const nodePath = getNodePath();
   const homeDir = os.homedir();
-  const instance = (process.env.NCL_INSTANCE || '').trim();
+  // Validated at ingestion — value flows raw into launchd plist XML,
+  // systemd `Environment=NCL_INSTANCE=...`, and on-disk filenames
+  // below, so it must be a known-safe charset.
+  const instance = readInstanceName();
   // Per-instance state dir under instances/<name>/ when NCL_INSTANCE is set,
   // else the project root (single-install layout). Logs follow the same
   // dir so two instances on one checkout don't share a log file.

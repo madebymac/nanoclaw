@@ -16,6 +16,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { readInstanceName } from '../src/instance-name.js';
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
 
@@ -35,7 +36,10 @@ function instanceContext(): {
   gatewayPort: number | null;
   postgresPort: number | null;
 } {
-  const name = (process.env.NCL_INSTANCE || '').trim();
+  // Validated at ingestion — throws on '..', shell metachars, etc. so
+  // installDir below (which becomes ~/.onecli-${name} and is exported
+  // to a curl|sh installer via ONECLI_HOME) is always path-safe.
+  const name = readInstanceName();
   const projectRoot = process.cwd();
   if (!name) {
     return {
