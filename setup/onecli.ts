@@ -12,6 +12,7 @@
  * get a ready gateway.
  */
 import { execFileSync, execSync } from 'child_process';
+import { randomBytes } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -328,8 +329,6 @@ function installInstanceGateway(
 function randomSecret(): string {
   // 32 random bytes, base64url-encoded. Enough entropy for NextAuth's
   // signing secret; matches the upstream installer's openssl rand approach.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { randomBytes } = require('crypto') as typeof import('crypto');
   return randomBytes(32).toString('base64url');
 }
 
