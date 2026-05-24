@@ -9,6 +9,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { readInstanceName } from '../src/instance-name.js';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
@@ -28,8 +29,16 @@ export async function run(_args: string[]): Promise<void> {
   const platform = getPlatform();
   const nodePath = getNodePath();
   const homeDir = os.homedir();
+  // Validated at ingestion — value flows raw into launchd plist XML,
+  // systemd `Environment=NCL_INSTANCE=...`, and on-disk filenames
+  // below, so it must be a known-safe charset.
+  const instance = readInstanceName();
+  // Per-instance state dir under instances/<name>/ when NCL_INSTANCE is set,
+  // else the project root (single-install layout). Logs follow the same
+  // dir so two instances on one checkout don't share a log file.
+  const stateDir = instance ? path.join(projectRoot, 'instances', instance) : projectRoot;
 
-  log.info('Setting up service', { platform, nodePath, projectRoot });
+  log.info('Setting up service', { platform, nodePath, projectRoot, instance: instance || '(none)' });
 
   // Build first
   log.info('Building TypeScript');
@@ -52,7 +61,7 @@ export async function run(_args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  fs.mkdirSync(path.join(projectRoot, 'logs'), { recursive: true });
+  fs.mkdirSync(path.join(stateDir, 'logs'), { recursive: true });
 
   // Peer preflight — a crash-looping peer install (most often the legacy v1
   // `com.nanoclaw` plist) will keep trashing this install's containers on
@@ -68,9 +77,9 @@ export async function run(_args: string[]): Promise<void> {
   }
 
   if (platform === 'macos') {
-    setupLaunchd(projectRoot, nodePath, homeDir);
+    setupLaunchd(projectRoot, nodePath, homeDir, instance, stateDir);
   } else if (platform === 'linux') {
-    setupLinux(projectRoot, nodePath, homeDir);
+    setupLinux(projectRoot, nodePath, homeDir, instance, stateDir);
   } else {
     emitStatus('SETUP_SERVICE', {
       SERVICE_TYPE: 'unknown',
@@ -123,10 +132,13 @@ function setupLaunchd(
   projectRoot: string,
   nodePath: string,
   homeDir: string,
+  instance: string,
+  stateDir: string,
 ): void {
   // Per-checkout service label so multiple NanoClaw installs can coexist
-  // without clobbering each other's plist.
-  const label = getLaunchdLabel(projectRoot);
+  // without clobbering each other's plist. NCL_INSTANCE further discriminates
+  // when two instances run from one checkout.
+  const label = getLaunchdLabel(projectRoot, instance);
   const plistPath = path.join(
     homeDir,
     'Library',
@@ -157,12 +169,18 @@ function setupLaunchd(
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
         <key>HOME</key>
-        <string>${homeDir}</string>
+        <string>${homeDir}</string>${
+          instance
+            ? `
+        <key>NCL_INSTANCE</key>
+        <string>${instance}</string>`
+            : ''
+        }
     </dict>
     <key>StandardOutPath</key>
-    <string>${projectRoot}/logs/nanoclaw.log</string>
+    <string>${stateDir}/logs/nanoclaw.log</string>
     <key>StandardErrorPath</key>
-    <string>${projectRoot}/logs/nanoclaw.error.log</string>
+    <string>${stateDir}/logs/nanoclaw.error.log</string>
 </dict>
 </plist>`;
 
@@ -220,14 +238,16 @@ function setupLinux(
   projectRoot: string,
   nodePath: string,
   homeDir: string,
+  instance: string,
+  stateDir: string,
 ): void {
   const serviceManager = getServiceManager();
 
   if (serviceManager === 'systemd') {
-    setupSystemd(projectRoot, nodePath, homeDir);
+    setupSystemd(projectRoot, nodePath, homeDir, instance, stateDir);
   } else {
     // WSL without systemd or other Linux without systemd
-    setupNohupFallback(projectRoot, nodePath, homeDir);
+    setupNohupFallback(projectRoot, nodePath, homeDir, instance, stateDir);
   }
 }
 
@@ -277,9 +297,11 @@ function setupSystemd(
   projectRoot: string,
   nodePath: string,
   homeDir: string,
+  instance: string,
+  stateDir: string,
 ): void {
   const runningAsRoot = isRoot();
-  const unitName = getSystemdUnit(projectRoot);
+  const unitName = getSystemdUnit(projectRoot, instance);
   const unitFileName = `${unitName}.service`;
 
   // Root uses system-level service, non-root uses user-level
@@ -298,7 +320,7 @@ function setupSystemd(
       log.warn(
         'systemd user session not available — falling back to nohup wrapper',
       );
-      setupNohupFallback(projectRoot, nodePath, homeDir);
+      setupNohupFallback(projectRoot, nodePath, homeDir, instance, stateDir);
       return;
     }
     const unitDir = path.join(homeDir, '.config', 'systemd', 'user');
@@ -308,7 +330,7 @@ function setupSystemd(
   }
 
   const unit = `[Unit]
-Description=NanoClaw Personal Assistant
+Description=NanoClaw Personal Assistant${instance ? ` (${instance})` : ''}
 After=network.target
 
 [Service]
@@ -319,9 +341,11 @@ Restart=always
 RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
-StandardOutput=append:${projectRoot}/logs/nanoclaw.log
-StandardError=append:${projectRoot}/logs/nanoclaw.error.log
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin${
+    instance ? `\nEnvironment=NCL_INSTANCE=${instance}` : ''
+  }
+StandardOutput=append:${stateDir}/logs/nanoclaw.log
+StandardError=append:${stateDir}/logs/nanoclaw.error.log
 
 [Install]
 WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
@@ -427,15 +451,19 @@ function setupNohupFallback(
   projectRoot: string,
   nodePath: string,
   homeDir: string,
+  instance: string,
+  stateDir: string,
 ): void {
   log.warn('No systemd detected — generating nohup wrapper script');
 
-  const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');
-  const pidFile = path.join(projectRoot, 'nanoclaw.pid');
+  const wrapperName = instance ? `start-nanoclaw-${instance}.sh` : 'start-nanoclaw.sh';
+  const pidName = instance ? `nanoclaw-${instance}.pid` : 'nanoclaw.pid';
+  const wrapperPath = path.join(projectRoot, wrapperName);
+  const pidFile = path.join(projectRoot, pidName);
 
   const lines = [
     '#!/bin/bash',
-    '# start-nanoclaw.sh — Start NanoClaw without systemd',
+    `# ${wrapperName} — Start NanoClaw${instance ? ` (instance: ${instance})` : ''} without systemd`,
     `# To stop: kill \\$(cat ${pidFile})`,
     '',
     'set -euo pipefail',
@@ -453,13 +481,14 @@ function setupNohupFallback(
     'fi',
     '',
     'echo "Starting NanoClaw..."',
+    ...(instance ? [`export NCL_INSTANCE=${JSON.stringify(instance)}`] : []),
     `nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot + '/dist/index.js')} \\`,
-    `  >> ${JSON.stringify(projectRoot + '/logs/nanoclaw.log')} \\`,
-    `  2>> ${JSON.stringify(projectRoot + '/logs/nanoclaw.error.log')} &`,
+    `  >> ${JSON.stringify(stateDir + '/logs/nanoclaw.log')} \\`,
+    `  2>> ${JSON.stringify(stateDir + '/logs/nanoclaw.error.log')} &`,
     '',
     `echo $! > ${JSON.stringify(pidFile)}`,
     'echo "NanoClaw started (PID $!)"',
-    `echo "Logs: tail -f ${projectRoot}/logs/nanoclaw.log"`,
+    `echo "Logs: tail -f ${stateDir}/logs/nanoclaw.log"`,
   ];
   const wrapper = lines.join('\n') + '\n';
 

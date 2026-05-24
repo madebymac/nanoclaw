@@ -5,6 +5,7 @@
  */
 import { createTelegramAdapter } from '@chat-adapter/telegram';
 
+import { ENV_FILE_PATH } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { createMessagingGroup, getMessagingGroupByPlatform, updateMessagingGroup } from '../db/messaging-groups.js';
@@ -197,7 +198,7 @@ function createPairingInterceptor(
 
 registerChannelAdapter('telegram', {
   factory: () => {
-    const env = readEnvFile(['TELEGRAM_BOT_TOKEN']);
+    const env = readEnvFile(['TELEGRAM_BOT_TOKEN'], ENV_FILE_PATH);
     if (!env.TELEGRAM_BOT_TOKEN) return null;
     const token = env.TELEGRAM_BOT_TOKEN;
     const telegramAdapter = createTelegramAdapter({

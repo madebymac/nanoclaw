@@ -14,11 +14,12 @@
  *   - ANTHROPIC_AUTH_TOKEN=placeholder — so the SDK adds an
  *     Authorization: Bearer header for OneCLI to overwrite
  */
+import { ENV_FILE_PATH } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 registerProviderContainerConfig('claude', () => {
-  const dotenv = readEnvFile(['ANTHROPIC_BASE_URL']);
+  const dotenv = readEnvFile(['ANTHROPIC_BASE_URL'], ENV_FILE_PATH);
   const env: Record<string, string> = {};
   if (dotenv.ANTHROPIC_BASE_URL) {
     env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
