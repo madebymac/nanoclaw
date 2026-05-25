@@ -342,7 +342,7 @@ Everything below is handled by the agent-runner, not the provider.
 
 **Concurrent polling during active query:** While the provider is running a query, the agent-runner continues polling messages_in on a short interval (~500ms). New pending messages are formatted and pushed into the active query via `provider.push()`. This lets follow-up messages arrive while the agent is processing — Claude handles this natively, Codex/OpenCode handle it via abort+restart internally.
 
-**Idle behavior:** When no messages are pending and no query is active, the agent-runner sleeps briefly (1s) and re-polls. The container stays warm until the host kills it (idle timeout).
+**Idle behavior:** When no messages are pending and no query is active, the agent-runner sleeps briefly (200ms) and re-polls. The container stays warm until the host kills it (idle timeout).
 
 **Idle detection exceptions:** The container should NOT be considered idle when:
 - An `ask_user_question` tool call is pending (waiting for user response in messages_in)

@@ -244,7 +244,7 @@ sequenceDiagram
   C->>IDB: poll messages_in
   C->>C: format xml → Claude SDK stream
   C->>ODB: INSERT messages_out (odd seq)<br/>parse &lt;message to='name'&gt; blocks
-  D->>ODB: 1s active poll / 60s sweep
+  D->>ODB: 200ms active poll / 60s sweep
   D->>D: hasDestination() re-validate
   D->>B: deliver via adapter
   B->>P: send · edit · react · file · card
