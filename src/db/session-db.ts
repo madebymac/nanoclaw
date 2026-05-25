@@ -9,10 +9,19 @@ import Database from 'better-sqlite3';
 
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 
+// synchronous=NORMAL is safe with journal_mode=DELETE: each commit still
+// fsyncs the journal before deletion, just without the extra full-database
+// fsync of FULL mode. Substantial speedup on slow disks (Pi SD card target)
+// with no durability loss for our crash model (no power-loss tolerance promised).
+// temp_store=MEMORY: any query that materializes a temp table/index stays in
+// RAM instead of touching disk. Cheap insurance.
+
 /** Apply the inbound or outbound schema to a DB file. Idempotent. */
 export function ensureSchema(dbPath: string, schema: 'inbound' | 'outbound'): void {
   const db = new Database(dbPath);
   db.pragma('journal_mode = DELETE');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('temp_store = MEMORY');
   db.exec(schema === 'inbound' ? INBOUND_SCHEMA : OUTBOUND_SCHEMA);
   db.close();
 }
@@ -21,7 +30,9 @@ export function ensureSchema(dbPath: string, schema: 'inbound' | 'outbound'): vo
 export function openInboundDb(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = DELETE');
+  db.pragma('synchronous = NORMAL');
   db.pragma('busy_timeout = 5000');
+  db.pragma('temp_store = MEMORY');
   return db;
 }
 
@@ -29,6 +40,7 @@ export function openInboundDb(dbPath: string): Database.Database {
 export function openOutboundDb(dbPath: string): Database.Database {
   const db = new Database(dbPath, { readonly: true });
   db.pragma('busy_timeout = 5000');
+  db.pragma('temp_store = MEMORY');
   return db;
 }
 
@@ -36,7 +48,9 @@ export function openOutboundDb(dbPath: string): Database.Database {
 export function openOutboundDbRw(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = DELETE');
+  db.pragma('synchronous = NORMAL');
   db.pragma('busy_timeout = 5000');
+  db.pragma('temp_store = MEMORY');
   return db;
 }
 
