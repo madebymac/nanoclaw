@@ -10,8 +10,11 @@
 # is persisted at data/install-id so the bash + node halves of setup use
 # the same id and events from one install join into a single funnel.
 
-NANOCLAW_PH_KEY='phc_fx1Hhx9ucz8GuaJC8LVZWO8u03yXZZJJ6ObS4yplnaP'
-NANOCLAW_PH_URL='https://us.i.posthog.com/capture/'
+# PostHog "phc_" project keys are public capture-only credentials — safe to
+# bake in. Overridable via NANOCLAW_PH_KEY so forks can point at their own
+# project without patching source.
+NANOCLAW_PH_KEY="${NANOCLAW_PH_KEY:-phc_fx1Hhx9ucz8GuaJC8LVZWO8u03yXZZJJ6ObS4yplnaP}"
+NANOCLAW_PH_URL="${NANOCLAW_PH_URL:-https://us.i.posthog.com/capture/}"
 
 # Resolve or create the persisted install id. Echoes the id (lowercase uuid).
 # Creates data/install-id on first use. Safe to call pre-Node: uses only

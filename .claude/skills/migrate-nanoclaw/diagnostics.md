@@ -11,9 +11,11 @@ node -p "process.versions.node.split('.')[0]"
 
 Write `/tmp/nanoclaw-diagnostics.json`. No paths, usernames, hostnames, or IP addresses.
 
+Use the PostHog project key from `setup/lib/diagnostics.sh` (`NANOCLAW_PH_KEY`, overridable via env). `phc_` keys are public capture-only credentials — safe to embed.
+
 ```json
 {
-  "api_key": "phc_fx1Hhx9ucz8GuaJC8LVZWO8u03yXZZJJ6ObS4yplnaP",
+  "api_key": "<NANOCLAW_PH_KEY>",
   "event": "migrate_complete",
   "distinct_id": "<uuid>",
   "properties": {
@@ -34,11 +36,12 @@ Write `/tmp/nanoclaw-diagnostics.json`. No paths, usernames, hostnames, or IP ad
 }
 ```
 
-Show the entire JSON to the user and ask via AskUserQuestion: **Yes** / **No** / **Never ask again**
+Show the entire JSON to the user (with the resolved key) and ask via AskUserQuestion: **Yes** / **No** / **Never ask again**
 
 **Yes**:
 ```bash
-curl -s -X POST https://us.i.posthog.com/capture/ -H 'Content-Type: application/json' -d @/tmp/nanoclaw-diagnostics.json
+source setup/lib/diagnostics.sh
+curl -s -X POST "$NANOCLAW_PH_URL" -H 'Content-Type: application/json' -d @/tmp/nanoclaw-diagnostics.json
 rm /tmp/nanoclaw-diagnostics.json
 ```
 
