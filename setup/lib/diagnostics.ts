@@ -10,8 +10,13 @@ import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-const POSTHOG_KEY = 'phc_fx1Hhx9ucz8GuaJC8LVZWO8u03yXZZJJ6ObS4yplnaP';
-const POSTHOG_URL = 'https://us.i.posthog.com/capture/';
+// PostHog "phc_" project keys are public capture-only credentials — safe to
+// bake in. Overridable via NANOCLAW_PH_KEY so forks can point at their own
+// project without patching source.
+const POSTHOG_KEY =
+  process.env.NANOCLAW_PH_KEY || 'phc_fx1Hhx9ucz8GuaJC8LVZWO8u03yXZZJJ6ObS4yplnaP';
+const POSTHOG_URL =
+  process.env.NANOCLAW_PH_URL || 'https://us.i.posthog.com/capture/';
 const INSTALL_ID_PATH = path.join('data', 'install-id');
 
 let cached: string | null = null;
