@@ -28,7 +28,12 @@ import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typ
 import type { OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
 
-const ACTIVE_POLL_MS = 1000;
+// Container is "running" only while a turn is in flight, so we can poll
+// aggressively without burning idle CPU. 200ms keeps worst-case detection
+// lag for an outbound row at one tick instead of a full second — the
+// inflightDeliveries guard below makes the higher cadence safe against
+// double-delivery races with the 60s sweep.
+const ACTIVE_POLL_MS = 200;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
 
@@ -38,7 +43,7 @@ const deliveryAttempts = new Map<string, number>();
 /**
  * Sessions whose outbound queue is currently being drained.
  *
- * The active poll (1s, running sessions) and the sweep poll (60s, all
+ * The active poll (200ms, running sessions) and the sweep poll (60s, all
  * active sessions) both call deliverSessionMessages, and a running session
  * is in *both* result sets. Without this guard, the two timer chains can
  * race on the same outbound row: both read it as undelivered, both call
@@ -46,7 +51,7 @@ const deliveryAttempts = new Map<string, number>();
  * INSERT OR IGNORE — but the user has already seen the message twice).
  *
  * Skipping (vs. queueing) is correct: any message left over when the
- * second caller skips will be picked up on the next poll tick (~1s).
+ * second caller skips will be picked up on the next poll tick.
  */
 const inflightDeliveries = new Set<string>();
 
@@ -105,7 +110,7 @@ export function setDeliveryAdapter(adapter: ChannelDeliveryAdapter): void {
   }
 }
 
-/** Start the active container poll loop (~1s). */
+/** Start the active container poll loop (200ms). */
 export function startActiveDeliveryPoll(): void {
   if (activePolling) return;
   activePolling = true;
