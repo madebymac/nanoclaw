@@ -15,6 +15,12 @@ export function initDb(dbPath: string): Database.Database {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   _db = new Database(dbPath);
   _db.pragma('journal_mode = WAL');
+  // synchronous=NORMAL is the standard pairing with WAL: durable across crashes,
+  // ~10× cheaper fsync cost on slow SD cards (Pi deployment target). Default
+  // FULL forces an fsync on every write — wasted on WAL's already-grouped writes.
+  _db.pragma('synchronous = NORMAL');
+  _db.pragma('busy_timeout = 5000');
+  _db.pragma('temp_store = MEMORY');
   _db.pragma('foreign_keys = ON');
   log.info('Central DB initialized', { path: dbPath });
   return _db;
