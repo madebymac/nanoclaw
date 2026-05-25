@@ -242,7 +242,7 @@ One-shot and recurring tasks use the same tables — no separate scheduler.
 - `messages_out WHERE delivered = 0 AND (deliver_after IS NULL OR deliver_after <= now())` → deliver
 - After completing/delivering a row with `recurrence`, insert next occurrence
 
-**Active container poll** (~1s) checks the same conditions but only for sessions with running containers.
+**Active container poll** (200ms) checks the same conditions but only for sessions with running containers.
 
 **Agent-runner creates schedules** by writing messages_in (to itself) or messages_out (reminders/notifications) with `process_after` and optionally `recurrence`.
 

@@ -90,7 +90,7 @@ sequenceDiagram
   C->>IDB: poll messages_in
   C->>C: format xml, stream to selected provider
   C->>ODB: INSERT messages_out (odd seq)<br/>parse <message to="name"> blocks
-  D->>ODB: 1s poll (active) / 60s (sweep)
+  D->>ODB: 200ms poll (active) / 60s (sweep)
   D->>D: hasDestination() re-validate
   D->>B: deliver via adapter
   B->>P: send message / edit / react / file / card

@@ -28,7 +28,12 @@ const STREAM_REPLIES = process.env.NANOCLAW_STREAM_REPLIES === '1';
  */
 const STREAM_EDIT_MIN_INTERVAL_MS = 1500;
 
-const POLL_INTERVAL_MS = 1000;
+// Idle / accumulate-only sleep between poll iterations when there's no
+// trigger=1 message to act on. 200ms matches the symmetric host-side
+// delivery poll cadence — worst-case wake lag for a freshly-inserted
+// inbound row drops from ~1s to 200ms. Cheap: most polls are no-op
+// indexed reads against messages_in.
+const POLL_INTERVAL_MS = 200;
 const ACTIVE_POLL_INTERVAL_MS = 500;
 
 function log(msg: string): void {
