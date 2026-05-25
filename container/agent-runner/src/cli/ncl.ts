@@ -49,10 +49,13 @@ function generateId(): string {
 function writeRequest(req: RequestFrame): void {
   const db = new Database(OUTBOUND_DB);
   db.exec('PRAGMA journal_mode = DELETE');
+  db.exec('PRAGMA synchronous = NORMAL');
   db.exec('PRAGMA busy_timeout = 5000');
+  db.exec('PRAGMA temp_store = MEMORY');
 
   const inDb = new Database(INBOUND_DB, { readonly: true });
   inDb.exec('PRAGMA busy_timeout = 5000');
+  inDb.exec('PRAGMA temp_store = MEMORY');
 
   try {
     db.exec('BEGIN IMMEDIATE');
@@ -105,7 +108,9 @@ function pollResponse(requestId: string, timeoutMs: number): ResponseFrame | nul
         // Mark as completed via processing_ack so agent-runner skips it
         const outDb = new Database(OUTBOUND_DB);
         outDb.exec('PRAGMA journal_mode = DELETE');
+        outDb.exec('PRAGMA synchronous = NORMAL');
         outDb.exec('PRAGMA busy_timeout = 5000');
+        outDb.exec('PRAGMA temp_store = MEMORY');
         outDb
           .prepare(
             "INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, 'completed', datetime('now'))",
