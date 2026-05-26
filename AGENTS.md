@@ -76,7 +76,7 @@ The whole deploy is serialized by `flock` on `/tmp/nanoclaw-build-<cwd-hash>.loc
 2. Run `make deploy` (or wait for the next self-upgrade tick). The missing `.env`, OneCLI compose project, and systemd unit get created inline.
 3. From a Claude Code session **with `NCL_INSTANCE=<name>` exported**, wire channels with `/add-telegram`, `/add-slack`, etc. Tokens land in `instances/<name>/.env` because the `set-env` setup step is instance-aware.
 
-Removing: drop the name from `INSTANCES`, stop and disable its systemd unit manually (the Makefile won't reap it for you), then `rm -rf instances/<name>/`.
+Removing: drop the name from `INSTANCES`, stop and disable its systemd unit manually (the Makefile won't reap it for you), tear down its OneCLI gateway with `docker compose -p onecli-<name> down` (otherwise it keeps running and holds its port triple), then `rm -rf instances/<name>/`.
 
 ## Per-instance channels and tokens
 
@@ -88,7 +88,7 @@ Anything that reads channel tokens via `readEnvFile()` **must** pass `ENV_FILE_P
 
 ## Operating an `ncl` session against a specific instance
 
-`ncl` connects to the host's Unix socket. The socket path is derived from the install slug, so you must export `NCL_INSTANCE` before running `ncl` on the host — otherwise it talks to whichever socket happens to match the empty-instance slug (usually nothing, and you get a connection error).
+`ncl` connects to the host's Unix socket at `<DATA_DIR>/ncl.sock`. Because `DATA_DIR` resolves under `instances/<name>/data/` when `NCL_INSTANCE` is set, you must export `NCL_INSTANCE` before running `ncl` on the host — otherwise it looks for the socket at `data/ncl.sock` in the repo root, which no running instance is listening on, and you get a connection error.
 
 ```bash
 NCL_INSTANCE=review  ncl groups list
@@ -99,7 +99,7 @@ Inside a container, `ncl` uses the session-DB transport — the instance is impl
 
 ## Container image: shared, not per-instance
 
-`CONTAINER_IMAGE_BASE` is intentionally **not** mixed with `NCL_INSTANCE` (see the comment block at the top of `src/install-slug.ts`). Both instances pull from the same `nanoclaw-agent:<slug>` tag. One `./container/build.sh` rebuilds for both. The per-spawn `--label nanoclaw-install=<slug>` does include the instance, so orphan cleanup still only reaps containers belonging to the right instance.
+`CONTAINER_IMAGE_BASE` is intentionally **not** mixed with `NCL_INSTANCE` (see the comment block at the top of `src/install-slug.ts`). Both instances pull from the same `nanoclaw-agent-v2-<slug>:latest` image — the per-checkout slug lives in the image name and the tag is always `latest`. One `./container/build.sh` rebuilds for both. The per-spawn `--label nanoclaw-install=<slug>` does include the instance, so orphan cleanup still only reaps containers belonging to the right instance.
 
 If you find yourself wanting per-instance container images (e.g. different package sets), don't fork the build — use per-agent-group container config (`ncl groups config update`, see CLAUDE.md → Container Config). That's what it's there for.
 
@@ -109,7 +109,7 @@ If you find yourself wanting per-instance container images (e.g. different packa
 - **Editing tokens by hand in `instances/<name>/.env`** → fine for `ASSISTANT_NAME`, `TZ`. For channel tokens, prefer running the install skill again so both the env file and the central-DB wiring stay in sync.
 - **`make deploy` from two shells at once** → safe, `flock` serializes them. Don't try to "work around" the lock; the second run is a no-op by design.
 - **Restarting only one instance** → `systemctl --user restart nanoclaw-v2-<slug>`. Get the slug from `make status` or compute it: `printf %s "$PWD:<name>" | sha1sum | cut -c1-8`.
-- **OneCLI port collisions** with other services on the host → bump `ONECLI_PORT_STRIDE` in `instances.conf` and re-run `make deploy`. Existing `.env` files won't be re-rendered (the script refuses to overwrite, to preserve tokens) — edit `ONECLI_URL` in each `instances/<name>/.env` by hand, or delete and re-render only the env file.
+- **OneCLI port collisions** with other services on the host → bump `ONECLI_PORT_STRIDE` in `instances.conf`. Existing `.env` files won't be re-rendered (the script refuses to overwrite, to preserve tokens), and the running OneCLI compose project is still bound to the old port. Fix in three steps per instance: `docker compose -p onecli-<name> down`, update `ONECLI_URL` in `instances/<name>/.env` to the new triple (or delete and re-render only the env file), then `make deploy` to bring the gateway back up on the new port.
 - **Mount allowlist changes** apply host-wide. Both instances share `~/.config/nanoclaw/mount-allowlist.json`. If you need different mount policies per instance, that's not supported today.
 
 ## Where to look when something breaks
