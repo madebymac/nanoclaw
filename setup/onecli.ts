@@ -291,18 +291,23 @@ function installInstanceGateway(
 
   fs.mkdirSync(ctx.installDir, { recursive: true });
 
-  // Copy the template into the per-instance dir. Done unconditionally so
-  // template fixes propagate on the next deploy tick.
+  // Render the template into the per-instance dir. Done unconditionally so
+  // template fixes propagate on the next deploy tick. The NEXTAUTH_SECRET
+  // line is conditionally emitted below — see the comment near
+  // hasGoogleOAuth for why we can't just leave it interpolating to "".
   const templatePath = path.join(process.cwd(), 'setup', 'onecli', 'docker-compose.yml.template');
   const composePath = path.join(ctx.installDir, 'docker-compose.yml');
-  fs.copyFileSync(templatePath, composePath);
+  const template = fs.readFileSync(templatePath, 'utf-8');
 
   // Per-instance .env. NEXTAUTH_SECRET is only meaningful in OAuth mode —
-  // recent OneCLI versions refuse to start when it's set without
-  // GOOGLE_CLIENT_ID/SECRET. Default installs run in local mode, so we omit
-  // the secret unless the user has manually added Google OAuth creds to the
-  // existing .env. Any previously-persisted secret without matching OAuth
-  // creds is stripped to unblock the gateway.
+  // recent OneCLI versions refuse to start when it's set (even to "")
+  // without GOOGLE_CLIENT_ID/SECRET. Default installs run in local mode,
+  // so we omit the secret unless the user has manually added Google OAuth
+  // creds to the existing .env. Any previously-persisted secret without
+  // matching OAuth creds is stripped to unblock the gateway. The compose
+  // template's NEXTAUTH_SECRET line is also conditionally rendered below,
+  // because `NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}` still injects the var
+  // as an empty string into the container, which OneCLI treats as "set".
   //
   // Google OAuth env vars and any other user-added lines are preserved
   // across redeploys — the writeback only owns the keys it explicitly sets.
@@ -360,6 +365,20 @@ function installInstanceGateway(
     '',
   ];
   fs.writeFileSync(envPath, envLines.join('\n'), { mode: 0o600 });
+
+  // Render the compose file: emit the NEXTAUTH_SECRET environment line
+  // only when we actually have a secret to pass. Otherwise the var would
+  // land in the container as "" and the gateway would refuse to boot.
+  const nextauthLine = nextauthSecret ? 'NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}' : '';
+  const rendered = template
+    .split('\n')
+    .flatMap((line) => {
+      if (!line.includes('__NEXTAUTH_SECRET_LINE__')) return [line];
+      if (!nextauthLine) return [];
+      return [line.replace(/#\s*__NEXTAUTH_SECRET_LINE__.*$/, nextauthLine)];
+    })
+    .join('\n');
+  fs.writeFileSync(composePath, rendered);
 
   const cmd = `docker compose --project-directory ${JSON.stringify(ctx.installDir)} -p ${JSON.stringify(ctx.composeProject)} up -d`;
   return runInstall(cmd);
