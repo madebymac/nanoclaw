@@ -67,6 +67,14 @@ services:
       # IP 172.17.0.1) since OAuth providers redirect the user's browser,
       # which lives on the host.
       NEXTAUTH_URL: http://127.0.0.1:${ONECLI_APP_PORT:-10254}
+      # The image's Next.js bundle also reads NEXT_PUBLIC_APP_URL (with a
+      # hardcoded "http://localhost:10254" fallback) when constructing the
+      # /app-connect OAuth redirect_uri for GitHub Apps and the Redirect
+      # URI shown in the UI. Without this override, non-default-port
+      # installs send users to localhost:10254 mid-OAuth even with
+      # NEXTAUTH_URL set correctly (NextAuth only governs its own
+      # /api/auth/callback/* routes, not OneCLI's /api/apps/* flow).
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:${ONECLI_APP_PORT:-10254}
       GATEWAY_API_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}
     volumes:
       - app-data:/app/data
