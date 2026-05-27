@@ -80,6 +80,10 @@ deploy: guard-instances
 	  pnpm build; \
 	  ./container/build.sh; \
 	  rc=0; for inst in $(INSTANCES); do \
+	    if [ ! -d $$HOME/.onecli-$$inst ]; then \
+	      echo "  WARN: $$inst OneCLI install dir missing, skipping bounce" >&2; rc=1; \
+	      continue; \
+	    fi; \
 	    echo "Bouncing OneCLI gateway for $$inst"; \
 	    docker compose --project-directory $$HOME/.onecli-$$inst -p onecli-$$inst up -d \
 	      || { echo "  WARN: $$inst OneCLI up -d failed" >&2; rc=1; }; \
