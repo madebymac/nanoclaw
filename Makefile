@@ -45,9 +45,10 @@ BUILD_LOCK := /tmp/nanoclaw-build-$(shell printf %s "$(CURDIR)" | sha1sum | cut 
 #        c. Register the per-instance systemd user unit if missing.
 #   4. pnpm build
 #   5. ./container/build.sh
-#   6. Restart the OneCLI gateway compose project for every instance
-#      (`docker compose restart` — preserves named volumes pgdata and
-#      app-data, no `down`/`up`/`--volumes`).
+#   6. Bounce the OneCLI gateway compose project for every instance
+#      (`docker compose up -d` — preserves named volumes pgdata and
+#      app-data, and re-reads the compose file / per-instance .env so
+#      template tweaks and `ONECLI_VERSION` bumps actually take effect).
 #   7. Restart every instance unit (tolerant — a single failed restart
 #      logs WARN, the loop continues, deploy exits non-zero overall).
 #
@@ -79,9 +80,9 @@ deploy: guard-instances
 	  pnpm build; \
 	  ./container/build.sh; \
 	  rc=0; for inst in $(INSTANCES); do \
-	    echo "Restarting OneCLI gateway for $$inst"; \
-	    docker compose --project-directory $$HOME/.onecli-$$inst -p onecli-$$inst restart \
-	      || { echo "  WARN: $$inst OneCLI restart failed" >&2; rc=1; }; \
+	    echo "Bouncing OneCLI gateway for $$inst"; \
+	    docker compose --project-directory $$HOME/.onecli-$$inst -p onecli-$$inst up -d \
+	      || { echo "  WARN: $$inst OneCLI up -d failed" >&2; rc=1; }; \
 	  done; \
 	  for inst in $(INSTANCES); do \
 	    unit=nanoclaw-v2-$$(printf %s "$(CURDIR):$$inst" | sha1sum | cut -c1-8); \
