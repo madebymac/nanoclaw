@@ -17,7 +17,12 @@ A scheduled agent that automatically reviews open pull requests using Claude Opu
 
 - Go to **github.com/settings/apps/new**
 - Name it (e.g. `my-review-bot` → appears as `my-review-bot[bot]`)
-- Set Callback URL to your OneCLI gateway's GitHub callback — e.g. `http://127.0.0.1:10254/api/apps/github/callback` for a default local install, or `http://127.0.0.1:<ONECLI_APP_PORT>/api/apps/github/callback` for a multi-instance install (see `instances.conf` for the port). Use `127.0.0.1`, not `localhost`, to match what OneCLI's NextAuth sends.
+- Set Callback URL to your OneCLI gateway's GitHub callback:
+  - Default local install: `http://127.0.0.1:10254/api/apps/github/callback`
+  - Multi-instance install: `http://127.0.0.1:<ONECLI_APP_PORT>/api/apps/github/callback` (port lives in `instances.conf` / `instances/<name>/.env`)
+  - Remote install: `https://<your-host>/api/apps/github/callback` — ensure that host/port is publicly reachable
+  - Use `127.0.0.1`, not `localhost` — NextAuth normalizes the callback to `127.0.0.1`, and GitHub treats the two as distinct strings, so a `localhost` registration will fail to match.
+  - **Upgrading from an older install?** The path changed from `/v1/apps/github/callback` to `/api/apps/github/callback`, and if you're on a non-default port the host part changes too. Update the App's callback URL in github.com/settings/apps before reconnecting.
 - Check **"Request user authorization (OAuth) during installation"**
 - Set Repository permissions:
   - **Contents**: Read
