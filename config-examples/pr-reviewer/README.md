@@ -17,7 +17,7 @@ A scheduled agent that automatically reviews open pull requests using Claude Opu
 
 - Go to **github.com/settings/apps/new**
 - Name it (e.g. `my-review-bot` → appears as `my-review-bot[bot]`)
-- Set Callback URL to your NanoClaw dashboard's GitHub callback — e.g. `http://localhost:10254/v1/apps/github/callback` for local development, or `https://your-host/v1/apps/github/callback` when running remotely
+- Set Callback URL to your OneCLI gateway's GitHub callback — e.g. `http://127.0.0.1:10254/api/apps/github/callback` for a default local install, or `http://127.0.0.1:<ONECLI_APP_PORT>/api/apps/github/callback` for a multi-instance install (see `instances.conf` for the port). Use `127.0.0.1`, not `localhost`, to match what OneCLI's NextAuth sends.
 - Check **"Request user authorization (OAuth) during installation"**
 - Set Repository permissions:
   - **Contents**: Read
