@@ -153,13 +153,11 @@ Key files: `src/container-restart.ts`, `src/container-runner.ts` (`killContainer
 
 API keys, OAuth tokens, and auth credentials are managed by the OneCLI gateway. Secrets are injected into per-agent containers at request time — none are passed in env vars or through chat context. The container agent sees this via the `onecli-gateway` container skill (`container/skills/onecli-gateway/SKILL.md`), which teaches it how the proxy works, how to handle auth errors, and to never ask for raw credentials. Host-side wiring: `src/onecli-approvals.ts`, `ensureAgent()` in `container-runner.ts`. Run `onecli --help`.
 
-### Gotcha: auto-created agents start in `selective` secret mode
+### Auto-created agents are flipped to `all` secret mode
 
-When the host first spawns a session for a new agent group, `container-runner.ts:385` calls `onecli.ensureAgent({ name, identifier })`. The OneCLI `POST /api/agents` endpoint creates the agent in **`selective`** secret mode — meaning **no secrets are assigned to it by default**, even if the secrets exist in the vault and have host patterns that would otherwise match.
+OneCLI's `POST /api/agents` creates new agents in **`selective`** secret mode — no secrets assigned, so calls to APIs whose credentials are in the vault fail with `401`. To avoid that footgun, `container-runner.ts:ensureAgentSecretModeAll` PATCHes `/api/agents/<id>/secret-mode` to `all` right after `ensureAgent`. The SDK doesn't expose this so we hit the HTTP API directly with the same Bearer token. Errors are logged and swallowed — the container still spawns, you just get the old selective-mode behaviour until OneCLI is healthy again.
 
-Symptom: container starts, the proxy + CA cert are wired correctly, but the agent gets `401 Unauthorized` (or similar) from APIs whose credentials *are* in the vault. The credential just isn't in this agent's allow-list.
-
-The SDK does not expose `setSecretMode` — the only fix is the CLI (or the web UI at `http://127.0.0.1:10254`).
+If you need to override (stay selective and pick specific secrets per agent), do it after the fact via the CLI or UI:
 
 ```bash
 # Find the agent (identifier is the agent group id)
