@@ -49,6 +49,69 @@ import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
+/**
+ * Flip a newly-created agent's secret mode from "selective" (OneCLI default)
+ * to "all" so every vault secret + connected app matching the request's
+ * host pattern gets injected, without per-agent assignment busywork.
+ *
+ * The SDK doesn't expose this — we hit the OneCLI HTTP API directly:
+ *   GET   /api/agents               → find the agent by identifier
+ *   PATCH /api/agents/<id>/secret-mode  body {mode:"all"}
+ *
+ * Errors are logged and swallowed: a fresh agent in selective mode still
+ * spawns, the user just hits the documented "401 / app not connected"
+ * symptom and can flip the mode by hand. Throwing here would block all
+ * sessions for the agent group on a transient OneCLI hiccup.
+ */
+async function ensureAgentSecretModeAll(identifier: string): Promise<void> {
+  const baseUrl = ONECLI_URL.replace(/\/+$/, '');
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (ONECLI_API_KEY) headers.Authorization = `Bearer ${ONECLI_API_KEY}`;
+
+  try {
+    const listRes = await fetch(`${baseUrl}/api/agents`, {
+      headers,
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!listRes.ok) {
+      log.warn('OneCLI list agents failed; cannot set secret mode', {
+        status: listRes.status,
+        identifier,
+      });
+      return;
+    }
+    const agents = (await listRes.json()) as Array<{
+      id: string;
+      identifier?: string;
+      secretMode?: 'all' | 'selective';
+    }>;
+    const agent = agents.find((a) => a.identifier === identifier);
+    if (!agent) {
+      log.warn('OneCLI agent not found after ensureAgent; skipping secret mode flip', { identifier });
+      return;
+    }
+    if (agent.secretMode === 'all') return; // already correct, idempotent no-op
+
+    const patchRes = await fetch(`${baseUrl}/api/agents/${agent.id}/secret-mode`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ mode: 'all' }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!patchRes.ok) {
+      log.warn('OneCLI set-secret-mode failed', {
+        status: patchRes.status,
+        identifier,
+        agentId: agent.id,
+      });
+      return;
+    }
+    log.info('OneCLI agent secret mode set to all', { identifier, agentId: agent.id });
+  } catch (err) {
+    log.warn('OneCLI set-secret-mode threw', { err: String(err), identifier });
+  }
+}
+
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
 
@@ -425,6 +488,7 @@ async function buildContainerArgs(
   // message pending, and the next sweep tick retries.
   if (agentIdentifier) {
     await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    await ensureAgentSecretModeAll(agentIdentifier);
   }
   const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
   if (!onecliApplied) {
