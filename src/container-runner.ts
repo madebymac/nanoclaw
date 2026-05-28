@@ -90,6 +90,15 @@ async function ensureAgentSecretModeAll(identifier: string): Promise<void> {
       log.warn('OneCLI agent not found after ensureAgent; skipping secret mode flip', { identifier });
       return;
     }
+    // Field name is reverse-engineered from the OneCLI HTTP API (no SDK contract).
+    // If OneCLI renames `secretMode` we'd silently lose the idempotency check
+    // and PATCH on every spawn — surface the drift instead.
+    if (agent.secretMode === undefined) {
+      log.warn('OneCLI agent missing expected `secretMode` field; field may have been renamed', {
+        identifier,
+        agentId: agent.id,
+      });
+    }
     if (agent.secretMode === 'all') return; // already correct, idempotent no-op
 
     const patchRes = await fetch(`${baseUrl}/api/agents/${agent.id}/secret-mode`, {
@@ -482,10 +491,16 @@ async function buildContainerArgs(
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
-  // are routed through the agent vault for credential injection. Treated as
-  // a transient hard failure: if we can't wire the gateway, we don't spawn.
-  // The caller (router or host-sweep) catches the throw, leaves the inbound
-  // message pending, and the next sweep tick retries.
+  // are routed through the agent vault for credential injection. The wiring
+  // calls (ensureAgent + applyContainerConfig) are treated as transient hard
+  // failures: if we can't wire the gateway, we don't spawn — the caller
+  // (router or host-sweep) catches the throw, leaves the inbound message
+  // pending, and the next sweep tick retries.
+  //
+  // ensureAgentSecretModeAll is intentionally best-effort: secret-mode is a
+  // credential-availability optimization, not a wiring prerequisite, so a
+  // OneCLI hiccup here degrades the agent to its old selective-mode
+  // behaviour (the documented gotcha) rather than blocking the spawn.
   if (agentIdentifier) {
     await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
     await ensureAgentSecretModeAll(agentIdentifier);
