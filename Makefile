@@ -68,8 +68,10 @@ deploy: guard-instances
 	      echo "==> [$$inst] rendering instances/$$inst/.env"; \
 	      scripts/render-instance-env.sh $$inst; \
 	    fi; \
-	    echo "==> [$$inst] (re-)rendering OneCLI gateway compose"; \
-	    NCL_INSTANCE=$$inst pnpm exec tsx setup/index.ts --step onecli; \
+	    if ! docker compose -p onecli-$$inst ps --status running --quiet 2>/dev/null | grep -q .; then \
+	      echo "==> [$$inst] bringing up OneCLI gateway"; \
+	      NCL_INSTANCE=$$inst pnpm exec tsx setup/index.ts --step onecli; \
+	    fi; \
 	    if [ ! -f $$HOME/.config/systemd/user/$$unit.service ]; then \
 	      echo "==> [$$inst] registering systemd unit $$unit"; \
 	      NCL_INSTANCE=$$inst pnpm exec tsx setup/index.ts --step service; \
