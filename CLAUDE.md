@@ -177,6 +177,23 @@ onecli secrets list                                    # all vault secrets (with
 
 If you've just enabled `mode all`, no container restart is needed — the gateway looks up secrets per request, so the next API call from the running container will see the new credentials.
 
+### App connections must live in the agent's project
+
+App connections (GitHub, Gmail, …) are **project-scoped**. The nanoclaw host authenticates with an API key seeded into a deterministic project, `proj-<instance>`, and the agent only sees connections that live there. But connections are made through the OneCLI **web UI**, and in local mode the UI auto-logs-in as a synthetic `admin@localhost` user and drops every connection into its OWN auto-created project (a random id like `cmyemojwswdjcvyi`). The UI reports success, but the connection lands in a project the agent never reads — so the agent reports "can't connect to `<provider>`" despite the UI showing it connected.
+
+`scripts/onecli-reconcile-connections.sh` fixes this: for each instance it moves any app connection sitting in a foreign project into `proj-<instance>` (aligning `organization_id`). It is idempotent and best-effort, and `make deploy` runs it automatically after bouncing each gateway. Run it by hand after connecting an app in the UI:
+
+```bash
+scripts/onecli-reconcile-connections.sh            # all instances
+scripts/onecli-reconcile-connections.sh general    # one instance
+
+# Verify a provider is visible to the agent's key (connection != null):
+curl -s -H "Authorization: Bearer $ONECLI_API_KEY" \
+  http://172.17.0.1:<app-port>/api/apps | jq '.[]|select(.id=="github").connection'
+```
+
+No container restart is needed — the gateway resolves connections per request, so the next call from the running agent will see the moved connection.
+
 ### Requiring approval for credential use
 
 Approval-gating credentialed actions is a **two-sided** flow:
