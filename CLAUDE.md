@@ -183,7 +183,7 @@ App connections (GitHub, Gmail, …) and the OAuth-app configs that back them ar
 
 Two tables matter: **`app_connections`** (the connected account + its tokens) and **`app_configs`** (the OAuth app client id/secret used to re-auth/refresh). A connection whose config is stranded in another project works off its cached token but breaks on refresh/reconnect — from the agent's project `/api/apps` shows `config: null`.
 
-`scripts/onecli-reconcile-connections.sh` fixes this: for each instance it moves any `app_connections` **and** `app_configs` row sitting in a foreign project into `proj-<instance>` (aligning `organization_id`). It is idempotent and best-effort, and `make deploy` runs it automatically after bouncing each gateway. Run it by hand after connecting an app in the UI:
+`scripts/onecli-reconcile-connections.sh` fixes this: for each instance it (1) moves any `app_connections` **and** `app_configs` row sitting in a foreign project into `proj-<instance>` (aligning `organization_id`), (2) grants the UI's `admin@localhost` user ownership of `org-<instance>` so **future** UI connects land in `proj-<instance>` directly — the durable fix, not a band-aid — and (3) reaps the empty throwaway projects/orgs the UI already auto-created (only ones created by `admin@localhost` that hold no connections/configs and orgs with no projects + no real members; the target and anything with data are never touched). It is idempotent and best-effort, and `make deploy` runs it automatically after bouncing each gateway. Run it by hand after connecting an app in the UI:
 
 ```bash
 scripts/onecli-reconcile-connections.sh            # all instances
