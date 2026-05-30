@@ -179,24 +179,27 @@ If you've just enabled `mode all`, no container restart is needed — the gatewa
 
 ### App connections must live in the agent's project
 
-App connections (GitHub, Gmail, …) are **project-scoped**. The nanoclaw host authenticates with an API key seeded into a deterministic project, `proj-<instance>`, and the agent only sees connections that live there. But connections are made through the OneCLI **web UI**, and in local mode the UI auto-logs-in as a synthetic `admin@localhost` user and drops every connection into its OWN auto-created project (a random id like `cmyemojwswdjcvyi`). The UI reports success, but the connection lands in a project the agent never reads — so the agent reports "can't connect to `<provider>`" despite the UI showing it connected.
+App connections (GitHub, Gmail, …) and the OAuth-app configs that back them are **project-scoped**. The nanoclaw host authenticates with an API key seeded into a deterministic project, `proj-<instance>`, and the agent only sees the ones that live there. But they're created through the OneCLI **web UI**, and in local mode the UI auto-logs-in as a synthetic `admin@localhost` user and drops everything into its OWN auto-created project (a random id like `cmyemojwswdjcvyi`). The UI reports success, but the rows land in a project the agent never reads — so the agent reports "can't connect to `<provider>`" despite the UI showing it connected.
 
-`scripts/onecli-reconcile-connections.sh` fixes this: for each instance it moves any app connection sitting in a foreign project into `proj-<instance>` (aligning `organization_id`). It is idempotent and best-effort, and `make deploy` runs it automatically after bouncing each gateway. Run it by hand after connecting an app in the UI:
+Two tables matter: **`app_connections`** (the connected account + its tokens) and **`app_configs`** (the OAuth app client id/secret used to re-auth/refresh). A connection whose config is stranded in another project works off its cached token but breaks on refresh/reconnect — from the agent's project `/api/apps` shows `config: null`.
+
+`scripts/onecli-reconcile-connections.sh` fixes this: for each instance it moves any `app_connections` **and** `app_configs` row sitting in a foreign project into `proj-<instance>` (aligning `organization_id`). It is idempotent and best-effort, and `make deploy` runs it automatically after bouncing each gateway. Run it by hand after connecting an app in the UI:
 
 ```bash
 scripts/onecli-reconcile-connections.sh            # all instances
 scripts/onecli-reconcile-connections.sh general    # one instance
 
-# Verify a provider is visible to the agent's key (connection != null).
-# Source the instance's own gateway URL + key so the host/port match what
-# the host actually uses (ONECLI_URL is the bridge IP in instances/<name>/.env;
-# it points at the gateway's configured bind host, no guessing needed):
+# Verify a provider is fully visible to the agent's key — both `config`
+# (the OAuth app) and `connection` should be non-null. Source the instance's
+# own gateway URL + key so the host/port match what the host actually uses
+# (ONECLI_URL is the bridge IP in instances/<name>/.env; it points at the
+# gateway's configured bind host, no guessing needed):
 set -a; . instances/general/.env; set +a
 curl -s -H "Authorization: Bearer $ONECLI_API_KEY" \
-  "$ONECLI_URL/api/apps" | jq '.[]|select(.id=="github").connection'
+  "$ONECLI_URL/api/apps" | jq '.[]|select(.id=="github")|{config,connection}'
 ```
 
-No container restart is needed — the gateway resolves connections per request, so the next call from the running agent will see the moved connection.
+No container restart is needed — the gateway resolves these per request, so the next call from the running agent will see the moved rows.
 
 ### Requiring approval for credential use
 

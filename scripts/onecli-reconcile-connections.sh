@@ -1,49 +1,60 @@
 #!/usr/bin/env bash
 #
-# Move OneCLI app connections (GitHub, Gmail, …) into the project the
-# nanoclaw agent actually authenticates against.
+# Move OneCLI app connections AND app configs (GitHub, Gmail, …) into the
+# project the nanoclaw agent actually authenticates against.
 #
 # Why this exists
 # ---------------
 # The nanoclaw host talks to its OneCLI gateway with an API key seeded into
-# a deterministic project, `proj-<instance>`. App connections are
-# project-scoped, so the agent only ever sees connections that live in
-# `proj-<instance>`.
+# a deterministic project, `proj-<instance>`. App connections and the app
+# (OAuth) configs that back them are project-scoped, so the agent only ever
+# sees the ones that live in `proj-<instance>`.
 #
 # Connections, however, are made through the OneCLI *web UI* — and in local
 # mode the UI auto-logs-in as a synthetic `admin@localhost` user and drops
-# every connection into ITS OWN auto-created project (a random id like
+# everything into ITS OWN auto-created project (a random id like
 # `cmyemojwswdjcvyi`), not `proj-<instance>`. The UI reports success, but
-# the connection lands in a project the agent never reads. The agent then
-# says "can't connect to <provider>" even though the connection genuinely
-# exists.
+# the connection (and its `app_configs` OAuth-app registration) land in a
+# project the agent never reads. The agent then says "can't connect to
+# <provider>" even though it genuinely connected.
 #
-# This script reconciles that: for each instance it moves any app
-# connection sitting in a foreign project into `proj-<instance>`, aligning
-# organization_id to that project's org. It is idempotent — a connection
-# already in the right project is left untouched — and best-effort: a
-# problem with one instance logs a WARN and never aborts the others (so it
-# is safe to wire into `make deploy`).
+# Two tables matter and both must be moved:
+#   - app_connections — the connected account / installation + its tokens.
+#   - app_configs     — the OAuth *app* registration (client id/secret) the
+#                       provider needs to re-auth / refresh. A connection
+#                       whose config is stranded in another project works
+#                       off its cached token but breaks on refresh/reconnect
+#                       (from the agent's project, /api/apps shows
+#                       `config: null`).
 #
-# Conflict handling: at most ONE stray is moved per provider (the most
-# recently updated), and only when `proj-<instance>` does not already hold
-# a connection for that provider. Any remaining strays — older duplicates
-# of the same provider, or providers that already have a connection in the
-# target — are left in place and surfaced as a WARN for manual resolution.
+# This script reconciles both: for each instance it moves any row sitting in
+# a foreign project into `proj-<instance>`, aligning organization_id to that
+# project's org. It is idempotent — a row already in the right project is
+# left untouched — and best-effort: a problem with one instance/table logs
+# a WARN and never aborts the others (so it is safe to wire into
+# `make deploy`).
+#
+# Conflict handling: at most ONE stray is moved per provider per table (the
+# most recently updated), and only when `proj-<instance>` does not already
+# hold one for that provider. Any remaining strays — older duplicates of the
+# same provider, or providers the target already has — are left in place and
+# surfaced as a WARN for manual resolution. (app_configs additionally has a
+# UNIQUE (organization_id, provider) constraint; since each instance is one
+# org → one project, the project-level guard also satisfies it. If a move
+# ever did violate it, the atomic statement rolls back and we WARN.)
 #
 # STOPGAP / external coupling: this reaches directly into OneCLI's internal
-# Postgres schema (`app_connections`, `projects`). OneCLI is an external
-# image pinned by tag, so a schema change upstream would break this
-# silently (you'd hit the "target project not found" / no-op path). It
-# exists only to work around the local-mode web UI dropping connections
-# into its own `admin@localhost` project instead of the API key's project;
-# delete it once the UI lands connections in the right project. The
-# `proj-<instance>` / `org-<instance>` names are a convention of the
-# external gateway provisioning that nanoclaw's per-instance API key is
-# bound to (the key in instances/<name>/.env ONECLI_API_KEY lives in
-# `proj-<instance>`). Nothing in THIS repo creates that project, so a
-# "target project not found" warning means the external provisioning
-# didn't run or used a different name.
+# Postgres schema (`app_connections`, `app_configs`, `projects`). OneCLI is
+# an external image pinned by tag, so a schema change upstream would break
+# this silently (you'd hit the "target project not found" / no-op path). It
+# exists only to work around the local-mode web UI dropping things into its
+# own `admin@localhost` project instead of the API key's project; delete it
+# once the UI lands them in the right project. The `proj-<instance>` /
+# `org-<instance>` names are a convention of the external gateway
+# provisioning that nanoclaw's per-instance API key is bound to (the key in
+# instances/<name>/.env ONECLI_API_KEY lives in `proj-<instance>`). Nothing
+# in THIS repo creates that project, so a "target project not found" warning
+# means the external provisioning didn't run or used a different name.
 #
 # Usage:
 #   scripts/onecli-reconcile-connections.sh            # all INSTANCES
@@ -75,6 +86,86 @@ if [ -z "${TARGETS// /}" ]; then
   echo "error: no instances to reconcile (empty INSTANCES and no args)" >&2
   exit 1
 fi
+
+# Move strays in one table into the current instance's target project.
+# Uses the loop-local `pg`, `inst`, `target`; sets the global `rc` on any
+# issue (best-effort — returns rather than aborting the caller).
+#
+#   reconcile_table <table> <noun> <recency-tiebreaker-col>
+#     <table>   app_connections | app_configs
+#     <noun>    human label for output, e.g. "connection" / "app config"
+#     <recency> secondary ORDER BY column after updated_at, used to pick the
+#               keeper per provider (connected_at for connections,
+#               created_at for configs — app_configs has no connected_at).
+reconcile_table() {
+  local table="$1" noun="$2" tiebreak="$3"
+  local strays moved leftover
+
+  # set -e is off, so distinguish a query *error* (psql exits non-zero via
+  # ON_ERROR_STOP) from a genuinely empty result — otherwise a transient
+  # failure would masquerade as "nothing to do" and silently report clean.
+  if ! strays="$(pg -c "SELECT provider || ' (in ' || COALESCE(project_id, '<none>') || ')' \
+                   FROM $table WHERE project_id IS DISTINCT FROM '$target' \
+                   ORDER BY provider")"; then
+    echo "  WARN: [$inst] failed to query $table, skipping" >&2
+    rc=1
+    return
+  fi
+  if [ -z "${strays//[$'\n']/}" ]; then
+    echo "==> [$inst] $table already in $target — nothing to do"
+    return
+  fi
+
+  echo "==> [$inst] found $noun(s) in $table outside $target:"
+  while IFS= read -r line; do
+    [ -n "$line" ] && echo "      - $line"
+  done <<< "$strays"
+
+  # `candidates` deterministically selects AT MOST ONE stray per provider —
+  # the most recently updated — and only for providers the target doesn't
+  # already have. We then update exactly those ids. This avoids the trap of
+  # filtering inside the UPDATE itself: a `WHERE NOT EXISTS (… project_id =
+  # target …)` guard is evaluated against the statement's pre-update MVCC
+  # snapshot, so two strays of the same provider would BOTH pass the guard
+  # and BOTH move, silently creating a duplicate. Picking the id set up
+  # front sidesteps that — any other strays for that provider stay put and
+  # are surfaced as leftover below.
+  if ! moved="$(pg -c "WITH candidates AS ( \
+      SELECT DISTINCT ON (ac.provider) ac.id \
+      FROM $table ac \
+      WHERE ac.project_id IS DISTINCT FROM '$target' \
+        AND NOT EXISTS ( \
+          SELECT 1 FROM $table t \
+          WHERE t.project_id = '$target' AND t.provider = ac.provider) \
+      ORDER BY ac.provider, ac.updated_at DESC, ac.$tiebreak DESC), \
+    moved AS ( \
+      UPDATE $table ac \
+      SET project_id = '$target', \
+          organization_id = (SELECT organization_id FROM projects WHERE id = '$target'), \
+          updated_at = now() \
+      FROM candidates c \
+      WHERE ac.id = c.id \
+      RETURNING 1) \
+    SELECT count(*) FROM moved")"; then
+    echo "  WARN: [$inst] move query for $table failed; rows left unchanged" >&2
+    rc=1
+    return
+  fi
+  moved="${moved//[[:space:]]/}"
+  echo "      moved ${moved:-0} $noun(s) into $target"
+
+  # Anything still misfiled is either a provider the target already had, or
+  # an older duplicate stray we deliberately didn't move. Surface it.
+  leftover="$(pg -c "SELECT provider || ' (in ' || COALESCE(project_id, '<none>') || ')' \
+                     FROM $table \
+                     WHERE project_id IS DISTINCT FROM '$target' ORDER BY provider")" || true
+  if [ -n "${leftover//[$'\n']/}" ]; then
+    echo "  WARN: [$inst] $noun(s) left outside $target (target already has that" >&2
+    echo "        provider, or a duplicate stray remains): $(echo $leftover | tr '\n' ' ')" >&2
+    echo "        Resolve by hand if the misfiled one is the keeper." >&2
+    rc=1
+  fi
+}
 
 rc=0
 
@@ -128,75 +219,9 @@ for inst in $TARGETS; do
     continue
   fi
 
-  # What's currently misfiled (anything not already in the target project)?
-  # set -e is off, so distinguish a query *error* (psql exits non-zero via
-  # ON_ERROR_STOP) from a genuinely empty result — otherwise a transient
-  # failure would masquerade as "nothing to do" and silently report clean.
-  if ! strays="$(pg -c "SELECT provider || ' (in ' || COALESCE(project_id, '<none>') || ')' \
-                   FROM app_connections WHERE project_id IS DISTINCT FROM '$target' \
-                   ORDER BY provider")"; then
-    echo "  WARN: [$inst] failed to query app_connections, skipping" >&2
-    rc=1
-    continue
-  fi
-  if [ -z "${strays//[$'\n']/}" ]; then
-    echo "==> [$inst] app connections already in $target — nothing to do"
-    continue
-  fi
-
-  echo "==> [$inst] found connection(s) outside $target:"
-  while IFS= read -r line; do
-    [ -n "$line" ] && echo "      - $line"
-  done <<< "$strays"
-
-  # Move strays into the target project, aligning organization_id to the
-  # target project's org.
-  #
-  # `candidates` deterministically selects AT MOST ONE stray per provider —
-  # the most recently updated — and only for providers the target doesn't
-  # already have. We then update exactly those ids. This avoids the trap of
-  # filtering inside the UPDATE itself: a `WHERE NOT EXISTS (… project_id =
-  # target …)` guard is evaluated against the statement's pre-update MVCC
-  # snapshot, so two strays of the same provider would BOTH pass the guard
-  # and BOTH move, silently creating a duplicate. Picking the id set up
-  # front sidesteps that — any other strays for that provider stay put and
-  # are surfaced as leftover below.
-  if ! moved="$(pg -c "WITH candidates AS ( \
-      SELECT DISTINCT ON (ac.provider) ac.id \
-      FROM app_connections ac \
-      WHERE ac.project_id IS DISTINCT FROM '$target' \
-        AND NOT EXISTS ( \
-          SELECT 1 FROM app_connections t \
-          WHERE t.project_id = '$target' AND t.provider = ac.provider) \
-      ORDER BY ac.provider, ac.updated_at DESC, ac.connected_at DESC), \
-    moved AS ( \
-      UPDATE app_connections ac \
-      SET project_id = '$target', \
-          organization_id = (SELECT organization_id FROM projects WHERE id = '$target'), \
-          updated_at = now() \
-      FROM candidates c \
-      WHERE ac.id = c.id \
-      RETURNING 1) \
-    SELECT count(*) FROM moved")"; then
-    echo "  WARN: [$inst] move query failed; connections left unchanged" >&2
-    rc=1
-    continue
-  fi
-  moved="${moved//[[:space:]]/}"
-  echo "      moved ${moved:-0} connection(s) into $target"
-
-  # Anything still misfiled is either a provider that already had a
-  # connection in the target, or an older duplicate stray we deliberately
-  # didn't move. Surface it for manual resolution.
-  leftover="$(pg -c "SELECT provider || ' (in ' || COALESCE(project_id, '<none>') || ')' \
-                     FROM app_connections \
-                     WHERE project_id IS DISTINCT FROM '$target' ORDER BY provider")" || true
-  if [ -n "${leftover//[$'\n']/}" ]; then
-    echo "  WARN: [$inst] connection(s) left outside $target (target already has that" >&2
-    echo "        provider, or a duplicate stray remains): $(echo $leftover | tr '\n' ' ')" >&2
-    echo "        Resolve by hand if the misfiled one is the keeper." >&2
-    rc=1
-  fi
+  # Move the OAuth app registration first, then the connection that uses it.
+  reconcile_table app_configs "app config" created_at
+  reconcile_table app_connections "connection" connected_at
 done
 
 exit $rc
