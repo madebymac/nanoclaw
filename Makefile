@@ -111,6 +111,9 @@ deploy: guard-instances
 	    else \
 	      echo "  WARN: $$inst OneCLI install dir missing, skipping bounce" >&2; rc=1; \
 	    fi; \
+	    echo "Reconciling OneCLI app connections for $$inst"; \
+	    scripts/onecli-reconcile-connections.sh $$inst \
+	      || { echo "  WARN: $$inst connection reconcile failed" >&2; rc=1; }; \
 	    ids=$$(docker ps -q --filter label=nanoclaw-install=$$slug); \
 	    if [ -n "$$ids" ]; then \
 	      echo "==> [$$inst] killing $$(echo $$ids | wc -w) agent container(s) (label nanoclaw-install=$$slug)"; \
