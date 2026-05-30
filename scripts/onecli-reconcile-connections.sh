@@ -216,10 +216,14 @@ ensure_admin_access_and_reap() {
     return
   fi
 
-  # 1) Grant — idempotent, non-destructive.
+  # 1) Grant — idempotent, non-destructive. ON CONFLICT targets the PK
+  #    (organization_id, user_id) and UPDATEs the role, so a pre-existing
+  #    lower-role membership (e.g. 'member') is upgraded to 'owner' instead
+  #    of silently no-op'ing — otherwise the UI still couldn't manage the
+  #    project.
   if ! pg -c "INSERT INTO organization_members (organization_id, user_id, user_email, role, created_at) \
               VALUES ('$target_org', '$admin_id', 'admin@localhost', 'owner', now()) \
-              ON CONFLICT DO NOTHING" >/dev/null; then
+              ON CONFLICT (organization_id, user_id) DO UPDATE SET role = 'owner'" >/dev/null; then
     echo "  WARN: [$inst] failed to grant admin@localhost access to $target_org" >&2
     rc=1
     return
@@ -231,11 +235,15 @@ ensure_admin_access_and_reap() {
   #    the transaction entirely — and the destructive deletes — when there's
   #    nothing to do. Anything still holding rows is left for the reconcile
   #    leftover-WARN, never auto-deleted.
-  n_proj="$(pg -c "SELECT count(*) FROM projects p \
+  if ! n_proj="$(pg -c "SELECT count(*) FROM projects p \
       WHERE p.id <> '$target' \
         AND p.created_by_user_email = 'admin@localhost' \
         AND NOT EXISTS (SELECT 1 FROM app_connections c WHERE c.project_id = p.id) \
-        AND NOT EXISTS (SELECT 1 FROM app_configs cf WHERE cf.project_id = p.id)")" || true
+        AND NOT EXISTS (SELECT 1 FROM app_configs cf WHERE cf.project_id = p.id)")"; then
+    echo "  WARN: [$inst] failed to count throwaway projects; skipping reap" >&2
+    rc=1
+    return
+  fi
   n_proj="$(printf '%s' "$n_proj" | tr -d '[:space:]')"
   if [ "${n_proj:-0}" = "0" ]; then
     echo "      no throwaway projects to reap"
@@ -246,8 +254,13 @@ ensure_admin_access_and_reap() {
   # DELETE is scoped to admin@localhost's empty throwaways; the target
   # project/org and anything with data are excluded by construction. OneCLI
   # seeds each project with a default agent + api key + audit logs (RESTRICT
-  # FKs), so clear those before the project; clear org members/invites before
-  # the org. ON_ERROR_STOP rolls the whole thing back on any error.
+  # FKs onto projects), so clear those before the project; clear org
+  # members/invites/provisions before the org. The agent's own dependents
+  # (agent_secrets, agent_app_connections, policy_rules) are all FK
+  # ON DELETE CASCADE onto agents — verified against the schema — so
+  # `DELETE FROM agents` clears them automatically; no other table has a
+  # blocking FK onto agents. ON_ERROR_STOP rolls the whole thing back on any
+  # error.
   if ! pg >/dev/null <<SQL
 BEGIN;
 CREATE TEMP TABLE _tw_proj ON COMMIT DROP AS
