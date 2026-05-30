@@ -121,6 +121,43 @@ async function ensureAgentSecretModeAll(identifier: string): Promise<void> {
   }
 }
 
+/**
+ * Rewrite the proxy port in the env args pushed by `applyContainerConfig`.
+ *
+ * OneCLI's `/api/container-config` hardcodes `host.docker.internal:10255`
+ * in `HTTPS_PROXY`/`HTTP_PROXY`, which is correct for stock single-instance
+ * setups (gateway on host port 10255) but wrong for multi-instance installs
+ * where each instance's gateway lives on `app_port + 1` (e.g. 10355, 10455).
+ * Without this rewrite, every API call from the container hangs because
+ * nothing is listening on :10255.
+ *
+ * Strategy: parse the port from ONECLI_URL, compute the expected proxy
+ * port, and rewrite the `-e HTTP[S]_PROXY=...` args in place. No-op when
+ * the computed port is already 10255 (single-instance default).
+ */
+function fixProxyGatewayPort(args: string[]): void {
+  let onecliPort: number;
+  try {
+    onecliPort = Number(new URL(ONECLI_URL).port);
+  } catch {
+    return;
+  }
+  if (!Number.isFinite(onecliPort) || onecliPort === 0) return;
+  const expectedProxyPort = onecliPort + 1;
+  if (expectedProxyPort === 10255) return;
+  const proxyKeys = new Set(['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']);
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] !== '-e') continue;
+    const next = args[i + 1];
+    const eq = next.indexOf('=');
+    if (eq < 0) continue;
+    const key = next.slice(0, eq);
+    if (!proxyKeys.has(key)) continue;
+    const value = next.slice(eq + 1);
+    args[i + 1] = `${key}=${value.replace(/:10255(?=[@/?#]|$)/g, `:${expectedProxyPort}`)}`;
+  }
+}
+
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
 
@@ -509,6 +546,7 @@ async function buildContainerArgs(
   if (!onecliApplied) {
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
+  fixProxyGatewayPort(args);
   log.info('OneCLI gateway applied', { containerName });
 
   // Host gateway
