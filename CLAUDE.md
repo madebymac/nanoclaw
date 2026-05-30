@@ -187,9 +187,13 @@ App connections (GitHub, Gmail, …) are **project-scoped**. The nanoclaw host a
 scripts/onecli-reconcile-connections.sh            # all instances
 scripts/onecli-reconcile-connections.sh general    # one instance
 
-# Verify a provider is visible to the agent's key (connection != null):
+# Verify a provider is visible to the agent's key (connection != null).
+# Source the instance's own gateway URL + key so the host/port match what
+# the host actually uses (ONECLI_URL is the bridge IP in instances/<name>/.env;
+# it points at the gateway's configured bind host, no guessing needed):
+set -a; . instances/general/.env; set +a
 curl -s -H "Authorization: Bearer $ONECLI_API_KEY" \
-  http://172.17.0.1:<app-port>/api/apps | jq '.[]|select(.id=="github").connection'
+  "$ONECLI_URL/api/apps" | jq '.[]|select(.id=="github").connection'
 ```
 
 No container restart is needed — the gateway resolves connections per request, so the next call from the running agent will see the moved connection.

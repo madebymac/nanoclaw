@@ -25,10 +25,25 @@
 # problem with one instance logs a WARN and never aborts the others (so it
 # is safe to wire into `make deploy`).
 #
-# Conflict handling: if `proj-<instance>` already holds a connection for a
-# provider, a stray duplicate for that same provider is NOT moved on top of
-# it (which would leave two rows for one provider). The stray is reported
-# and left in place for manual resolution.
+# Conflict handling: at most ONE stray is moved per provider (the most
+# recently updated), and only when `proj-<instance>` does not already hold
+# a connection for that provider. Any remaining strays — older duplicates
+# of the same provider, or providers that already have a connection in the
+# target — are left in place and surfaced as a WARN for manual resolution.
+#
+# STOPGAP / external coupling: this reaches directly into OneCLI's internal
+# Postgres schema (`app_connections`, `projects`). OneCLI is an external
+# image pinned by tag, so a schema change upstream would break this
+# silently (you'd hit the "target project not found" / no-op path). It
+# exists only to work around the local-mode web UI dropping connections
+# into its own `admin@localhost` project instead of the API key's project;
+# delete it once the UI lands connections in the right project. The
+# `proj-<instance>` / `org-<instance>` names are a convention of the
+# external gateway provisioning that nanoclaw's per-instance API key is
+# bound to (the key in instances/<name>/.env ONECLI_API_KEY lives in
+# `proj-<instance>`). Nothing in THIS repo creates that project, so a
+# "target project not found" warning means the external provisioning
+# didn't run or used a different name.
 #
 # Usage:
 #   scripts/onecli-reconcile-connections.sh            # all INSTANCES
@@ -64,6 +79,8 @@ fi
 rc=0
 
 for inst in $TARGETS; do
+  # External-gateway convention: the per-instance API key (and the agent)
+  # live in a project named `proj-<instance>`. See the header note.
   target="proj-$inst"
   dir="$HOME/.onecli-$inst"
 
@@ -112,9 +129,16 @@ for inst in $TARGETS; do
   fi
 
   # What's currently misfiled (anything not already in the target project)?
-  strays="$(pg -c "SELECT provider || ' (in ' || COALESCE(project_id, '<none>') || ')' \
+  # set -e is off, so distinguish a query *error* (psql exits non-zero via
+  # ON_ERROR_STOP) from a genuinely empty result — otherwise a transient
+  # failure would masquerade as "nothing to do" and silently report clean.
+  if ! strays="$(pg -c "SELECT provider || ' (in ' || COALESCE(project_id, '<none>') || ')' \
                    FROM app_connections WHERE project_id IS DISTINCT FROM '$target' \
-                   ORDER BY provider")"
+                   ORDER BY provider")"; then
+    echo "  WARN: [$inst] failed to query app_connections, skipping" >&2
+    rc=1
+    continue
+  fi
   if [ -z "${strays//[$'\n']/}" ]; then
     echo "==> [$inst] app connections already in $target — nothing to do"
     continue
@@ -126,31 +150,50 @@ for inst in $TARGETS; do
   done <<< "$strays"
 
   # Move strays into the target project, aligning organization_id to the
-  # target project's org. Skip any provider that already has a connection
-  # in the target project (NOT EXISTS guard) so we never create a duplicate
-  # provider row. (Rare: two strays of the same provider in different
-  # foreign projects would both match — left for manual cleanup, surfaced
-  # by the post-move report below.)
-  moved="$(pg -c "WITH moved AS ( \
-      UPDATE app_connections ac \
-      SET project_id = '$target', \
-          organization_id = (SELECT organization_id FROM projects WHERE id = '$target'), \
-          updated_at = now() \
+  # target project's org.
+  #
+  # `candidates` deterministically selects AT MOST ONE stray per provider —
+  # the most recently updated — and only for providers the target doesn't
+  # already have. We then update exactly those ids. This avoids the trap of
+  # filtering inside the UPDATE itself: a `WHERE NOT EXISTS (… project_id =
+  # target …)` guard is evaluated against the statement's pre-update MVCC
+  # snapshot, so two strays of the same provider would BOTH pass the guard
+  # and BOTH move, silently creating a duplicate. Picking the id set up
+  # front sidesteps that — any other strays for that provider stay put and
+  # are surfaced as leftover below.
+  if ! moved="$(pg -c "WITH candidates AS ( \
+      SELECT DISTINCT ON (ac.provider) ac.id \
+      FROM app_connections ac \
       WHERE ac.project_id IS DISTINCT FROM '$target' \
         AND NOT EXISTS ( \
           SELECT 1 FROM app_connections t \
           WHERE t.project_id = '$target' AND t.provider = ac.provider) \
+      ORDER BY ac.provider, ac.updated_at DESC, ac.connected_at DESC), \
+    moved AS ( \
+      UPDATE app_connections ac \
+      SET project_id = '$target', \
+          organization_id = (SELECT organization_id FROM projects WHERE id = '$target'), \
+          updated_at = now() \
+      FROM candidates c \
+      WHERE ac.id = c.id \
       RETURNING 1) \
-    SELECT count(*) FROM moved")"
+    SELECT count(*) FROM moved")"; then
+    echo "  WARN: [$inst] move query failed; connections left unchanged" >&2
+    rc=1
+    continue
+  fi
   moved="${moved//[[:space:]]/}"
   echo "      moved ${moved:-0} connection(s) into $target"
 
-  # Anything still misfiled was skipped by the duplicate guard.
-  leftover="$(pg -c "SELECT provider FROM app_connections \
-                     WHERE project_id IS DISTINCT FROM '$target' ORDER BY provider")"
+  # Anything still misfiled is either a provider that already had a
+  # connection in the target, or an older duplicate stray we deliberately
+  # didn't move. Surface it for manual resolution.
+  leftover="$(pg -c "SELECT provider || ' (in ' || COALESCE(project_id, '<none>') || ')' \
+                     FROM app_connections \
+                     WHERE project_id IS DISTINCT FROM '$target' ORDER BY provider")" || true
   if [ -n "${leftover//[$'\n']/}" ]; then
-    echo "  WARN: [$inst] left in place (a connection for the same provider already" >&2
-    echo "        exists in $target): $(echo $leftover | tr '\n' ' ')" >&2
+    echo "  WARN: [$inst] connection(s) left outside $target (target already has that" >&2
+    echo "        provider, or a duplicate stray remains): $(echo $leftover | tr '\n' ' ')" >&2
     echo "        Resolve by hand if the misfiled one is the keeper." >&2
     rc=1
   fi
