@@ -2,9 +2,10 @@
 #
 # Reconcile OneCLI so app connections work for the nanoclaw agent:
 #   1. move stray app connections + app configs into the agent's project,
-#   2. grant the UI's synthetic admin@localhost user access to that project
-#      so FUTURE connects land there directly (the long-term fix), and
-#   3. reap the empty throwaway projects/orgs the UI already auto-created.
+#   2. grant the UI's synthetic admin@localhost user access to that project,
+#   3. make that project admin@localhost's DEFAULT project, so the UI opens
+#      there and FUTURE connects land there directly (the long-term fix), and
+#   4. reap the empty throwaway projects/orgs the UI already auto-created.
 #
 # Why this exists
 # ---------------
@@ -46,20 +47,31 @@
 # org → one project, the project-level guard also satisfies it. If a move
 # ever did violate it, the atomic statement rolls back and we WARN.)
 #
-# Long-term fix (grant + reap): moving rows is only a band-aid for things
-# connected before the fix. The durable fix is to make `admin@localhost` —
-# the user every local-mode UI session logs in as — an owner of the agent's
-# org, so the UI can target `proj-<instance>` and future connects land there
-# directly (validated: after the grant, a fresh UI login reuses the org
-# instead of spawning a new throwaway project). We then reap the throwaway
-# projects/orgs the UI already auto-created for that user. The reap is
-# deliberately conservative — it only deletes a project that is NOT the
-# target, was `created_by_user_email = 'admin@localhost'`, and holds NO
-# app_connections / app_configs (so the move above can never lose data), plus
-# the org behind it once that org has no projects left and no non-admin
-# members. The target project/org and anything with real data are never
-# touched. Both are idempotent: once the grant is in place no new throwaways
-# appear, so subsequent runs are no-ops.
+# Long-term fix (grant + default project + reap): moving rows is only a
+# band-aid for things connected before the fix. The durable fix makes the
+# user every local-mode UI session logs in as — `admin@localhost` — operate
+# inside the agent's project:
+#   - grant it ownership of the agent's org (`org-<instance>`), and
+#   - set `proj-<instance>` as its DEFAULT project.
+# The local-mode UI bounces to /create-org whenever the NextAuth session has
+# no projectId, and that projectId comes from findUserDefaultProject(), which
+# keys off a project's `created_by` — NOT org membership. So org ownership
+# alone isn't enough; without a default project admin@localhost lands in the
+# /create-org dead-end (which 404s). Pointing `proj-<instance>.created_by` at
+# admin@localhost makes the UI open directly in the agent's project, so
+# connects land there with no project switching.
+#
+# We then reap the throwaway projects/orgs the UI already auto-created for
+# that user. The reap is deliberately conservative — it only deletes a
+# project that is NOT the target, was `created_by_user_email =
+# 'admin@localhost'`, and holds NO app_connections / app_configs (so the move
+# above can never lose data), plus the org behind it once that org has no
+# projects left and no non-admin members. The target project/org and anything
+# with real data are never touched — and because the target is now
+# admin@localhost's default project, the reap can no longer strand the user
+# (the bug that earlier 404'd /overview). All steps are idempotent: once the
+# default project is set no new throwaways appear, so subsequent runs are
+# no-ops.
 #
 # STOPGAP / external coupling: this reaches directly into OneCLI's internal
 # Postgres schema (`app_connections`, `app_configs`, `projects`). OneCLI is
@@ -185,9 +197,10 @@ reconcile_table() {
   fi
 }
 
-# Ensure the UI's synthetic admin@localhost user owns the agent's org (so
-# future UI connects target proj-<instance>), then reap the empty throwaway
-# projects/orgs it already created. Uses loop-local `pg`, `inst`, `target`;
+# Ensure the UI's synthetic admin@localhost user owns the agent's org AND has
+# proj-<instance> as its default project (so the UI opens there and future
+# connects land there), then reap the empty throwaway projects/orgs it
+# already created. Uses loop-local `pg`, `inst`, `target`;
 # sets global `rc` on issues. See the "Long-term fix" header note.
 ensure_admin_access_and_reap() {
   local admin_id target_org n_proj
@@ -230,7 +243,29 @@ ensure_admin_access_and_reap() {
   fi
   echo "==> [$inst] admin@localhost owns $target_org (UI connects can target $target)"
 
-  # 2) Reap. Pre-count throwaway projects (those NOT the target, created by
+  # 2) Make proj-<instance> the admin user's DEFAULT project. The local-mode
+  #    web UI redirects to /create-org whenever its NextAuth session has no
+  #    projectId — and that projectId comes from findUserDefaultProject(),
+  #    which keys off a project's created_by, NOT org membership. So an
+  #    admin@localhost that owns the org but created no project of its own
+  #    lands in the /create-org dead-end (which 404s in local mode). This is
+  #    exactly the trap the reap below would otherwise (re)create by deleting
+  #    the throwaway project the UI made for that user. Point proj-<instance>'s
+  #    created_by at admin@localhost and mark onboarding complete: the UI then
+  #    opens directly in the agent's project, so connects also land there with
+  #    no project switching, and the reap can no longer strand the user (the
+  #    target is excluded from it). Idempotent.
+  if ! pg -c "UPDATE projects SET created_by_user_id = '$admin_id', created_by_user_email = 'admin@localhost' \
+              WHERE id = '$target' AND created_by_user_id IS DISTINCT FROM '$admin_id'; \
+              UPDATE users SET onboarding_completed_at = COALESCE(onboarding_completed_at, now()) \
+              WHERE id = '$admin_id'" >/dev/null; then
+    echo "  WARN: [$inst] failed to set $target as admin@localhost's default project" >&2
+    rc=1
+    return
+  fi
+  echo "==> [$inst] $target is admin@localhost's default project (UI opens there)"
+
+  # 3) Reap. Pre-count throwaway projects (those NOT the target, created by
   #    admin@localhost, with no app_connections/app_configs) so we can skip
   #    the transaction entirely — and the destructive deletes — when there's
   #    nothing to do. Anything still holding rows is left for the reconcile
