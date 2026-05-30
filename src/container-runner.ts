@@ -122,39 +122,82 @@ async function ensureAgentSecretModeAll(identifier: string): Promise<void> {
 }
 
 /**
+ * Hardcoded proxy port baked into OneCLI 1.23.x's `/api/container-config`
+ * response (it ignores `GATEWAY_API_URL` and always emits
+ * `host.docker.internal:10255` in `HTTPS_PROXY`/`HTTP_PROXY`). Stock
+ * single-instance installs put the gateway on host port 10255, so the
+ * default matches and nothing has to be rewritten.
+ */
+const ONECLI_DEFAULT_PROXY_PORT = 10255;
+
+/**
+ * Per-instance OneCLI port allocation is defined in `instances.conf` —
+ * the i-th instance gets a contiguous triple
+ * `(app, proxy, …) = (base + i*stride, base + i*stride + 1, base + i*stride + 2)`.
+ * So the proxy port for any given OneCLI app port is `app_port + 1`.
+ * If that allocation convention ever changes in `instances.conf`,
+ * `fixProxyGatewayPort` will rewrite to the wrong port.
+ */
+const ONECLI_PROXY_PORT_OFFSET = 1;
+
+const PROXY_ENV_KEYS = new Set(['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']);
+
+/**
  * Rewrite the proxy port in the env args pushed by `applyContainerConfig`.
  *
- * OneCLI's `/api/container-config` hardcodes `host.docker.internal:10255`
- * in `HTTPS_PROXY`/`HTTP_PROXY`, which is correct for stock single-instance
- * setups (gateway on host port 10255) but wrong for multi-instance installs
- * where each instance's gateway lives on `app_port + 1` (e.g. 10355, 10455).
- * Without this rewrite, every API call from the container hangs because
- * nothing is listening on :10255.
+ * OneCLI 1.23.x hardcodes `host.docker.internal:10255` in the
+ * `HTTPS_PROXY`/`HTTP_PROXY` env it returns from `/api/container-config`,
+ * which is correct for stock single-instance setups but wrong for
+ * multi-instance installs where each instance's proxy lives on a
+ * different port (see `instances.conf` and `ONECLI_PROXY_PORT_OFFSET`
+ * above). Without this rewrite, every API call from the container hangs
+ * because nothing is listening on :10255.
  *
- * Strategy: parse the port from ONECLI_URL, compute the expected proxy
- * port, and rewrite the `-e HTTP[S]_PROXY=...` args in place. No-op when
- * the computed port is already 10255 (single-instance default).
+ * Strategy: parse the port from `onecliUrl`, compute the expected proxy
+ * port (`app_port + ONECLI_PROXY_PORT_OFFSET`), and rewrite the
+ * `-e HTTP[S]_PROXY=...` args in place. No-op when the computed port is
+ * already `ONECLI_DEFAULT_PROXY_PORT` (single-instance default).
+ *
+ * If `expectedProxyPort !== ONECLI_DEFAULT_PROXY_PORT` but zero proxy args
+ * get rewritten, the function logs a warning — that means OneCLI changed
+ * the hardcoded port, the env-key set, or the `-e KEY=VALUE` arg shape
+ * (e.g. switched to `--env` or `-e KEY VALUE`), all of which would
+ * silently resurrect the original hang.
+ *
+ * Exported only for unit tests.
  */
-function fixProxyGatewayPort(args: string[]): void {
+export function fixProxyGatewayPort(args: string[], onecliUrl: string): void {
   let onecliPort: number;
   try {
-    onecliPort = Number(new URL(ONECLI_URL).port);
+    onecliPort = Number(new URL(onecliUrl).port);
   } catch {
     return;
   }
   if (!Number.isFinite(onecliPort) || onecliPort === 0) return;
-  const expectedProxyPort = onecliPort + 1;
-  if (expectedProxyPort === 10255) return;
-  const proxyKeys = new Set(['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']);
+  const expectedProxyPort = onecliPort + ONECLI_PROXY_PORT_OFFSET;
+  if (expectedProxyPort === ONECLI_DEFAULT_PROXY_PORT) return;
+
+  const defaultPortBoundary = new RegExp(`:${ONECLI_DEFAULT_PROXY_PORT}(?=[@/?#]|$)`, 'g');
+  let rewriteCount = 0;
   for (let i = 0; i < args.length - 1; i++) {
     if (args[i] !== '-e') continue;
     const next = args[i + 1];
     const eq = next.indexOf('=');
     if (eq < 0) continue;
     const key = next.slice(0, eq);
-    if (!proxyKeys.has(key)) continue;
+    if (!PROXY_ENV_KEYS.has(key)) continue;
     const value = next.slice(eq + 1);
-    args[i + 1] = `${key}=${value.replace(/:10255(?=[@/?#]|$)/g, `:${expectedProxyPort}`)}`;
+    const rewritten = value.replace(defaultPortBoundary, `:${expectedProxyPort}`);
+    if (rewritten !== value) rewriteCount++;
+    args[i + 1] = `${key}=${rewritten}`;
+  }
+
+  if (rewriteCount === 0) {
+    log.warn('fixProxyGatewayPort: no proxy args rewritten — OneCLI may have changed the hardcoded port or arg shape', {
+      onecliPort,
+      expectedProxyPort,
+      defaultProxyPort: ONECLI_DEFAULT_PROXY_PORT,
+    });
   }
 }
 
@@ -546,7 +589,7 @@ async function buildContainerArgs(
   if (!onecliApplied) {
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
-  fixProxyGatewayPort(args);
+  fixProxyGatewayPort(args, ONECLI_URL);
   log.info('OneCLI gateway applied', { containerName });
 
   // Host gateway
