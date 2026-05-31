@@ -288,6 +288,10 @@ function buildTelegramAdapter(bot: TelegramBot, opts: BuildOptions = {}): Channe
     supportsThreads: false,
     transformOutboundText: sanitizeTelegramLegacyMarkdown,
     maxTextLength: 4000,
+    // Isolate this bot's Chat SDK state (dedupe/locks) from sibling bots —
+    // the inner SDK adapter name is the shared 'telegram', so without this
+    // two bots collide on per-message dedupe and only one ever replies.
+    stateNamespace: chanType,
   });
 
   const botUsernamePromise = fetchBotUsername(token);

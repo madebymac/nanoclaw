@@ -74,6 +74,14 @@ export interface ChatSdkBridgeConfig {
    * and reactions still target the head of the reply.
    */
   maxTextLength?: number;
+  /**
+   * Namespace for the shared chat_sdk_* state store. Multiple bots on the same
+   * platform (e.g. one Telegram bot per agent) share the central state tables;
+   * without distinct namespaces their per-message dedupe keys collide and only
+   * one bot processes each message. Pass the per-bot channel_type here.
+   * Defaults to the SDK adapter name (fine for single-bot platforms).
+   */
+  stateNamespace?: string;
 }
 
 /**
@@ -200,7 +208,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     async setup(hostConfig: ChannelSetup) {
       setupConfig = hostConfig;
 
-      state = new SqliteStateAdapter();
+      // Namespace the shared chat_sdk_* state by this bot's channel_type so
+      // multiple bots don't collide on per-message dedupe keys (which omit
+      // bot identity) — otherwise two bots in one group race and only one
+      // processes each message. `adapter.name` is the shared SDK platform name
+      // ('telegram'); the per-bot channel_type comes in via stateNamespace.
+      state = new SqliteStateAdapter(config.stateNamespace ?? adapter.name);
 
       chat = new Chat({
         adapters: { [adapter.name]: adapter },
