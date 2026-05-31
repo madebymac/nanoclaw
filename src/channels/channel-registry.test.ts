@@ -95,6 +95,55 @@ describe('channel registry', () => {
     });
   });
 
+  it('should start multiple adapters from one registration (multi-bot)', async () => {
+    const { registerChannelAdapter, initChannelAdapters, getChannelAdapter } = await import('./channel-registry.js');
+
+    registerChannelAdapter('telegram-multi', {
+      factory: () => [createMockAdapter('telegram#andy'), createMockAdapter('telegram#bea')],
+    });
+
+    await initChannelAdapters(() => ({
+      conversations: [],
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    }));
+
+    // Each bot is registered under its own channel_type key.
+    expect(getChannelAdapter('telegram#andy')).toBeDefined();
+    expect(getChannelAdapter('telegram#bea')).toBeDefined();
+    expect(getChannelAdapter('telegram#andy')!.channelType).toBe('telegram#andy');
+    expect(getChannelAdapter('telegram#bea')!.channelType).toBe('telegram#bea');
+  });
+
+  it('isolates a failing bot so its siblings still start', async () => {
+    const { registerChannelAdapter, initChannelAdapters, getChannelAdapter } = await import('./channel-registry.js');
+
+    const good = createMockAdapter('telegram#good');
+    const bad = createMockAdapter('telegram#bad');
+    // Force a non-network setup failure on the bad bot — should NOT retry and
+    // should NOT prevent the good bot from registering.
+    bad.setup = async () => {
+      throw new Error('bad token');
+    };
+
+    registerChannelAdapter('telegram-isolation', {
+      factory: () => [bad, good],
+    });
+
+    await initChannelAdapters(() => ({
+      conversations: [],
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    }));
+
+    expect(getChannelAdapter('telegram#bad')).toBeUndefined();
+    expect(getChannelAdapter('telegram#good')).toBeDefined();
+  });
+
   it('should skip adapters that return null (missing credentials)', async () => {
     const { registerChannelAdapter, initChannelAdapters, getActiveAdapters } = await import('./channel-registry.js');
 

@@ -166,8 +166,20 @@ export interface ChannelAdapter {
   openDM?(userHandle: string): Promise<string>;
 }
 
-/** Factory function that creates a channel adapter (returns null if credentials missing). */
-export type ChannelAdapterFactory = () => ChannelAdapter | Promise<ChannelAdapter> | null;
+/**
+ * Factory function that creates channel adapter(s) (returns null if no
+ * credentials are configured).
+ *
+ * May return MORE THAN ONE adapter: single-instance multi-bot channels (e.g.
+ * one Telegram bot per agent) return one adapter per configured channel account,
+ * each carrying a distinct `channelType` (`<family>#<slug>`). The registry
+ * stores each under its own `channelType` key.
+ */
+export type ChannelAdapterFactory = () =>
+  | ChannelAdapter
+  | ChannelAdapter[]
+  | null
+  | Promise<ChannelAdapter | ChannelAdapter[] | null>;
 
 /** Registration entry for a channel adapter. */
 export interface ChannelRegistration {

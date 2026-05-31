@@ -28,6 +28,7 @@ import {
   type AccessGateResult,
 } from '../../router.js';
 import type { InboundEvent } from '../../channels/adapter.js';
+import { channelFamily } from '../../channels/channel-family.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
@@ -90,11 +91,15 @@ function extractAndUpsertUser(event: InboundEvent): string | null {
   const rawHandle = senderIdField ?? senderField ?? authorUserId;
   if (!rawHandle) return null;
 
-  const userId = rawHandle.includes(':') ? rawHandle : `${event.channelType}:${rawHandle}`;
+  // Namespace by channel FAMILY, not the per-bot channel_type. A person is the
+  // same human whichever of our bots they message (telegram#a vs telegram#b),
+  // so their id and roles must be stable: `telegram:<handle>`.
+  const family = channelFamily(event.channelType);
+  const userId = rawHandle.includes(':') ? rawHandle : `${family}:${rawHandle}`;
   if (!getUser(userId)) {
     upsertUser({
       id: userId,
-      kind: event.channelType,
+      kind: family,
       display_name: senderName ?? null,
       created_at: new Date().toISOString(),
     });
@@ -233,7 +238,7 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<b
   const clickerId = payload.userId
     ? payload.userId.includes(':')
       ? payload.userId
-      : `${payload.channelType}:${payload.userId}`
+      : `${channelFamily(payload.channelType)}:${payload.userId}`
     : null;
   const isAuthorized =
     clickerId !== null && (clickerId === row.approver_user_id || hasAdminPrivilege(clickerId, row.agent_group_id));
@@ -314,7 +319,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   const clickerId = payload.userId
     ? payload.userId.includes(':')
       ? payload.userId
-      : `${payload.channelType}:${payload.userId}`
+      : `${channelFamily(payload.channelType)}:${payload.userId}`
     : null;
   const isAuthorized =
     clickerId !== null && (clickerId === row.approver_user_id || hasAdminPrivilege(clickerId, row.agent_group_id));

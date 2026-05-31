@@ -4,6 +4,8 @@
  */
 import './groups.js';
 import './messaging-groups.js';
+import './channel-accounts.js';
+import './github-apps.js';
 import './wirings.js';
 import './users.js';
 import './roles.js';

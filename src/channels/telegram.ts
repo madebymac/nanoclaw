@@ -2,13 +2,29 @@
  * Telegram channel adapter (v2) — uses Chat SDK bridge, with a pairing
  * interceptor wrapped around onInbound to verify chat ownership before
  * registration. See telegram-pairing.ts for the why.
+ *
+ * Single-instance multi-bot: this factory produces ONE adapter per Telegram
+ * `channel_account` row, each running its own bot token and listening on its
+ * own `channel_type` (`telegram#<slug>`). That is how an operator gets a
+ * standalone @handle per agent without running multiple host processes. If no
+ * accounts are configured in the DB but a legacy `TELEGRAM_BOT_TOKEN` is set in
+ * `.env`, a single default bot is started on `channel_type='telegram'` so
+ * existing single-bot installs keep working unchanged.
  */
 import { createTelegramAdapter } from '@chat-adapter/telegram';
 
 import { ENV_FILE_PATH } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
-import { createMessagingGroup, getMessagingGroupByPlatform, updateMessagingGroup } from '../db/messaging-groups.js';
+import { getChannelAccountsByFamily, legacyChannelType } from '../db/channel-accounts.js';
+import {
+  createMessagingGroup,
+  createMessagingGroupAgent,
+  getMessagingGroupAgents,
+  getMessagingGroupByPlatform,
+  updateMessagingGroup,
+} from '../db/messaging-groups.js';
+import { getAgentGroup } from '../db/agent-groups.js';
 import { grantRole, hasAnyOwner } from '../modules/permissions/db/user-roles.js';
 import { upsertUser } from '../modules/permissions/db/users.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
@@ -16,6 +32,8 @@ import { sanitizeTelegramLegacyMarkdown } from './telegram-markdown-sanitize.js'
 import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
+
+const TELEGRAM_FAMILY = 'telegram';
 
 /**
  * Retry a one-shot operation that can fail on transient network errors at
@@ -81,12 +99,6 @@ function readInboundFields(message: InboundMessage): InboundFields {
 }
 
 /**
- * Build an onInbound interceptor that consumes pairing codes before they
- * reach the router. On match: records the chat + its paired user, promotes
- * the user to owner if the instance has no owner yet, and short-circuits.
- * On miss: forwards to the host.
- */
-/**
  * Send a one-shot confirmation back to the paired chat. Best-effort — failures
  * are logged but never propagated, so a Telegram outage can't undo a successful
  * pairing or trigger the interceptor's fail-open path.
@@ -111,10 +123,57 @@ async function sendPairingConfirmation(token: string, platformId: string): Promi
   }
 }
 
+/**
+ * Auto-wire a freshly-paired chat to the bot's bound agent group. This is what
+ * makes "register a bot for an agent, then DM it" work end to end: the channel
+ * account carries the agent binding, so on pairing we create the
+ * messaging_group_agents row with the same defaults the manual wiring flow uses
+ * (DMs respond to everything; groups are mention-only). No-op when the account
+ * isn't bound to an agent, the agent group is gone, or a wiring already exists.
+ */
+function autoWireToAgent(messagingGroupId: string, isGroup: boolean, agentGroupId: string | null): void {
+  if (!agentGroupId) return;
+  try {
+    if (!getAgentGroup(agentGroupId)) {
+      log.warn('Channel account bound to missing agent group; skipping auto-wire', { agentGroupId });
+      return;
+    }
+    if (getMessagingGroupAgents(messagingGroupId).length > 0) return;
+    createMessagingGroupAgent({
+      id: `mga-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      messaging_group_id: messagingGroupId,
+      agent_group_id: agentGroupId,
+      engage_mode: isGroup ? 'mention' : 'pattern',
+      engage_pattern: isGroup ? null : '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: new Date().toISOString(),
+    });
+    log.info('Auto-wired paired chat to bound agent', { messagingGroupId, agentGroupId });
+  } catch (err) {
+    log.error('Auto-wire to bound agent failed', { messagingGroupId, agentGroupId, err });
+  }
+}
+
+/**
+ * Build an onInbound interceptor that consumes pairing codes before they
+ * reach the router. On match: records the chat (under THIS bot's channel_type)
+ * + its paired user, optionally auto-wires the chat to the bot's bound agent,
+ * promotes the user to owner if the instance has no owner yet, and
+ * short-circuits. On miss: forwards to the host.
+ *
+ * `chanType` is the per-bot channel_type (`telegram#<slug>` or legacy
+ * `telegram`); the paired USER is always namespaced by the family (`telegram:`)
+ * so a person's identity and roles are stable across every bot.
+ */
 function createPairingInterceptor(
   botUsernamePromise: Promise<string | null>,
   hostOnInbound: ChannelSetup['onInbound'],
   token: string,
+  chanType: string,
+  agentGroupId: string | null,
 ): ChannelSetup['onInbound'] {
   return async (platformId, threadId, message) => {
     try {
@@ -143,27 +202,32 @@ function createPairingInterceptor(
       // code-bearing message never reaches an agent. Privilege is now a
       // property of the paired user, not the chat: upsert the user, and if
       // this instance has no owner yet, promote them to owner.
-      const existing = getMessagingGroupByPlatform('telegram', platformId);
+      const isGroup = consumed.consumed!.isGroup;
+      const existing = getMessagingGroupByPlatform(chanType, platformId);
+      let messagingGroupId: string;
       if (existing) {
-        updateMessagingGroup(existing.id, {
-          is_group: consumed.consumed!.isGroup ? 1 : 0,
-        });
+        messagingGroupId = existing.id;
+        updateMessagingGroup(existing.id, { is_group: isGroup ? 1 : 0 });
       } else {
+        messagingGroupId = `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         createMessagingGroup({
-          id: `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          channel_type: 'telegram',
+          id: messagingGroupId,
+          channel_type: chanType,
           platform_id: platformId,
           name: consumed.consumed!.name,
-          is_group: consumed.consumed!.isGroup ? 1 : 0,
+          is_group: isGroup ? 1 : 0,
           unknown_sender_policy: 'strict',
           created_at: new Date().toISOString(),
         });
       }
 
-      const pairedUserId = `telegram:${consumed.consumed!.adminUserId}`;
+      // Bind the chat to the bot's agent so DMing the bot just works.
+      autoWireToAgent(messagingGroupId, isGroup, agentGroupId);
+
+      const pairedUserId = `${TELEGRAM_FAMILY}:${consumed.consumed!.adminUserId}`;
       upsertUser({
         id: pairedUserId,
-        kind: 'telegram',
+        kind: TELEGRAM_FAMILY,
         display_name: null,
         created_at: new Date().toISOString(),
       });
@@ -181,6 +245,7 @@ function createPairingInterceptor(
       }
 
       log.info('Telegram pairing accepted — chat registered', {
+        channelType: chanType,
         platformId,
         pairedUser: pairedUserId,
         promotedToOwner,
@@ -196,51 +261,84 @@ function createPairingInterceptor(
   };
 }
 
-registerChannelAdapter('telegram', {
+interface TelegramBot {
+  channelType: string;
+  token: string;
+  agentGroupId: string | null;
+}
+
+/** Build a single Telegram adapter for one bot identity. */
+function buildTelegramAdapter(bot: TelegramBot): ChannelAdapter {
+  const { channelType: chanType, token, agentGroupId } = bot;
+  const telegramAdapter = createTelegramAdapter({
+    botToken: token,
+    mode: 'polling',
+  });
+  const bridge = createChatSdkBridge({
+    adapter: telegramAdapter,
+    concurrency: 'concurrent',
+    extractReplyContext,
+    supportsThreads: false,
+    transformOutboundText: sanitizeTelegramLegacyMarkdown,
+    maxTextLength: 4000,
+  });
+
+  const botUsernamePromise = fetchBotUsername(token);
+
+  const wrapped: ChannelAdapter = {
+    ...bridge,
+    // Each bot listens on its own channel_type so the registry, router, and
+    // delivery resolve the right bot for inbound + outbound. The bridge would
+    // otherwise default both to the shared SDK adapter name ('telegram').
+    name: chanType,
+    channelType: chanType,
+    resolveChannelName: async (platformId: string) => {
+      const chatId = platformId.split(':').slice(1).join(':');
+      if (!chatId) return null;
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId }),
+        });
+        const data = (await res.json()) as { ok?: boolean; result?: { title?: string } };
+        return data.ok ? (data.result?.title ?? null) : null;
+      } catch {
+        return null;
+      }
+    },
+    async setup(hostConfig: ChannelSetup) {
+      const intercepted: ChannelSetup = {
+        ...hostConfig,
+        onInbound: createPairingInterceptor(botUsernamePromise, hostConfig.onInbound, token, chanType, agentGroupId),
+      };
+      return withRetry(() => bridge.setup(intercepted), `bridge.setup(${chanType})`);
+    },
+  };
+  return wrapped;
+}
+
+/**
+ * Resolve the set of Telegram bots to start. Prefers DB channel accounts (one
+ * bot per agent); falls back to a single legacy bot from `TELEGRAM_BOT_TOKEN`
+ * when no accounts exist, so single-bot installs keep working.
+ */
+function resolveTelegramBots(): TelegramBot[] {
+  const accounts = getChannelAccountsByFamily(TELEGRAM_FAMILY).filter((a) => a.bot_token);
+  if (accounts.length > 0) {
+    return accounts.map((a) => ({ channelType: a.id, token: a.bot_token!, agentGroupId: a.agent_group_id }));
+  }
+  const env = readEnvFile(['TELEGRAM_BOT_TOKEN'], ENV_FILE_PATH);
+  if (env.TELEGRAM_BOT_TOKEN) {
+    return [{ channelType: legacyChannelType(TELEGRAM_FAMILY), token: env.TELEGRAM_BOT_TOKEN, agentGroupId: null }];
+  }
+  return [];
+}
+
+registerChannelAdapter(TELEGRAM_FAMILY, {
   factory: () => {
-    const env = readEnvFile(['TELEGRAM_BOT_TOKEN'], ENV_FILE_PATH);
-    if (!env.TELEGRAM_BOT_TOKEN) return null;
-    const token = env.TELEGRAM_BOT_TOKEN;
-    const telegramAdapter = createTelegramAdapter({
-      botToken: token,
-      mode: 'polling',
-    });
-    const bridge = createChatSdkBridge({
-      adapter: telegramAdapter,
-      concurrency: 'concurrent',
-      extractReplyContext,
-      supportsThreads: false,
-      transformOutboundText: sanitizeTelegramLegacyMarkdown,
-      maxTextLength: 4000,
-    });
-
-    const botUsernamePromise = fetchBotUsername(token);
-
-    const wrapped: ChannelAdapter = {
-      ...bridge,
-      resolveChannelName: async (platformId: string) => {
-        const chatId = platformId.split(':').slice(1).join(':');
-        if (!chatId) return null;
-        try {
-          const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId }),
-          });
-          const data = (await res.json()) as { ok?: boolean; result?: { title?: string } };
-          return data.ok ? (data.result?.title ?? null) : null;
-        } catch {
-          return null;
-        }
-      },
-      async setup(hostConfig: ChannelSetup) {
-        const intercepted: ChannelSetup = {
-          ...hostConfig,
-          onInbound: createPairingInterceptor(botUsernamePromise, hostConfig.onInbound, token),
-        };
-        return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
-      },
-    };
-    return wrapped;
+    const bots = resolveTelegramBots();
+    if (bots.length === 0) return null;
+    return bots.map(buildTelegramAdapter);
   },
 });

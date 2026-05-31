@@ -46,49 +46,73 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
   return registry.get(name)?.containerConfig;
 }
 
+/** Set up a single adapter (with NetworkError retry) and register it. */
+async function startOneAdapter(
+  name: string,
+  adapter: ChannelAdapter,
+  setupFn: (adapter: ChannelAdapter) => ChannelSetup,
+): Promise<void> {
+  const setup = setupFn(adapter);
+  // Transient network failures during adapter init (e.g. Telegram deleteWebhook
+  // hitting a DNS hiccup at boot) would otherwise leave the channel permanently
+  // dead until manual restart. Retry only on NetworkError so misconfigs (bad
+  // tokens, etc.) still fail fast.
+  let attempt = 0;
+  while (true) {
+    try {
+      await adapter.setup(setup);
+      break;
+    } catch (err) {
+      if (isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
+        const delay = SETUP_RETRY_DELAYS_MS[attempt]!;
+        log.warn('Channel adapter setup failed with network error, retrying', {
+          channel: name,
+          type: adapter.channelType,
+          attempt: attempt + 1,
+          delayMs: delay,
+          err: err.message,
+        });
+        await sleep(delay);
+        attempt += 1;
+        continue;
+      }
+      throw err;
+    }
+  }
+  activeAdapters.set(adapter.channelType, adapter);
+  log.info('Channel adapter started', { channel: name, type: adapter.channelType });
+}
+
 /**
  * Instantiate and set up all registered channel adapters.
- * Skips adapters that return null (missing credentials).
+ * Skips registrations that return null (no credentials configured).
+ *
+ * A registration may produce MULTIPLE adapters (single-instance multi-bot — one
+ * Telegram bot per agent). Each is set up and registered under its own
+ * `channelType` key, and each is isolated: a bad token on one bot logs and is
+ * skipped without taking down its siblings.
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
   for (const [name, registration] of registry) {
+    let produced: ChannelAdapter | ChannelAdapter[] | null;
     try {
-      const adapter = await registration.factory();
-      if (!adapter) {
-        log.warn('Channel credentials missing, skipping', { channel: name });
-        continue;
-      }
-
-      const setup = setupFn(adapter);
-      // Transient network failures during adapter init (e.g. Telegram deleteWebhook
-      // hitting a DNS hiccup at boot) would otherwise leave the channel permanently
-      // dead until manual restart. Retry only on NetworkError so misconfigs (bad
-      // tokens, etc.) still fail fast.
-      let attempt = 0;
-      while (true) {
-        try {
-          await adapter.setup(setup);
-          break;
-        } catch (err) {
-          if (isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
-            const delay = SETUP_RETRY_DELAYS_MS[attempt]!;
-            log.warn('Channel adapter setup failed with network error, retrying', {
-              channel: name,
-              attempt: attempt + 1,
-              delayMs: delay,
-              err: err.message,
-            });
-            await sleep(delay);
-            attempt += 1;
-            continue;
-          }
-          throw err;
-        }
-      }
-      activeAdapters.set(adapter.channelType, adapter);
-      log.info('Channel adapter started', { channel: name, type: adapter.channelType });
+      produced = await registration.factory();
     } catch (err) {
-      log.error('Failed to start channel adapter', { channel: name, err });
+      log.error('Channel adapter factory threw', { channel: name, err });
+      continue;
+    }
+    if (!produced || (Array.isArray(produced) && produced.length === 0)) {
+      log.warn('Channel credentials missing, skipping', { channel: name });
+      continue;
+    }
+
+    const adapters = Array.isArray(produced) ? produced : [produced];
+    for (const adapter of adapters) {
+      try {
+        await startOneAdapter(name, adapter, setupFn);
+      } catch (err) {
+        log.error('Failed to start channel adapter', { channel: name, type: adapter.channelType, err });
+      }
     }
   }
 }
