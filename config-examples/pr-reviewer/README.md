@@ -36,6 +36,66 @@ A scheduled agent that automatically reviews open pull requests using Claude Opu
 - Enter your App ID and slug, upload the private key
 - Complete the OAuth flow
 
+### 2a. Alternative: bot identity without OneCLI Pro
+
+If you don't have OneCLI Pro (the self-hosted GitHub App bot identity is a Pro
+feature), you can mint installation tokens yourself directly from the App's
+private key — no gateway connection required. The bot identity is exactly the
+same (`my-review-bot[bot]`); only the token source changes.
+
+**1. Gather the App's credentials.** From your GitHub App settings:
+
+- **App ID** — the numeric ID on the App's settings page.
+- **Private key** — generate one under "Private keys" and download the `.pem`.
+  Store it on the host outside the repo (e.g. `~/.nanoclaw/github-app.pem`,
+  `chmod 600`). It never goes in `.env` or the repo.
+- **Installation ID** — install the App on your repos, then read it from the URL
+  at `github.com/settings/installations/<INSTALLATION_ID>`.
+
+**2. Mint a token with the broker.** `scripts/github-app-token.mjs` signs a JWT
+with the private key and exchanges it for a short-lived (≈1h) installation
+token:
+
+```bash
+export GITHUB_APP_ID=123456
+export GITHUB_APP_PRIVATE_KEY_PATH=$HOME/.nanoclaw/github-app.pem
+export GITHUB_APP_INSTALLATION_ID=789012
+TOKEN=$(node scripts/github-app-token.mjs)
+```
+
+The private key is read from disk and the token is captured into a shell
+variable — neither is printed into the agent's context. Use the broker from
+**scripts** (like the pre-agent `poll-script.js`) or as a git credential helper.
+Don't have the agent itself run the broker and read its stdout, or the token
+lands in the conversation.
+
+**3. Use the token.** For the GitHub API, send it as a bearer token instead of
+relying on the proxy to inject one:
+
+```js
+const token = execSync('node scripts/github-app-token.mjs', {
+  env: { ...process.env, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, GITHUB_APP_INSTALLATION_ID },
+}).toString().trim();
+const headers = {
+  Authorization: `Bearer ${token}`,
+  Accept: 'application/vnd.github+json',
+  'X-GitHub-Api-Version': '2022-11-28',
+};
+```
+
+For git operations, wire it as a credential helper so each fetch/push gets a
+fresh token without it ever being logged:
+
+```bash
+git config --global credential.https://github.com.helper \
+  '!f() { echo "username=x-access-token"; echo "password=$(node /path/to/scripts/github-app-token.mjs)"; }; f'
+```
+
+Installation tokens expire after ~1h, so always mint a fresh one per run (or per
+git operation via the helper) rather than caching it. The poll script in this
+example assumes the proxy injects credentials; with this approach, drop in the
+bearer token above instead.
+
 ### 3. Configure the files
 
 In `poll-script.js`:
