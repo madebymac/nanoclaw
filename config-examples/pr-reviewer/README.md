@@ -38,28 +38,87 @@ A scheduled agent that automatically reviews open pull requests using Claude Opu
 
 ### 2a. Alternative: bot identity without OneCLI Pro
 
-The OneCLI dashboard GitHub App connection (step 2) requires a Pro subscription on self-hosted installs. If you want bot identity on a free self-hosted setup, use the token broker script instead.
+The OneCLI dashboard GitHub App connection (step 2) requires a Pro subscription on self-hosted installs. If you want bot identity on a free self-hosted setup, use the token broker script (`scripts/github-app-token.mjs`) instead.
 
-**Why this approach:** The private key must never appear in the LLM's context window (it would be sent to the model provider and logged). The broker script reads the key from disk, generates a JWT, and exchanges it for a short-lived installation token. The agent calls the script and sees only the token.
+**Why this approach:** The private key must never appear in the LLM's context window (it would be sent to the model provider and logged). The broker reads the key from disk, builds a signed JWT, and exchanges it for a short-lived installation token. The agent only ever sees the token — never the key.
 
-**Setup:**
+**How the pieces fit:** the broker runs *inside* the agent container (the scheduled poll script and the agent both run there). Two things follow from that:
 
-1. Download your GitHub App's private key (`.pem`) from github.com/settings/apps → your app → "Private keys".
-2. Store it outside the repo, in a path the agent container can read but that is never committed (e.g. `~/.nanoclaw-secrets/github-app.pem`). Lock it down: `chmod 600`. Do not place it anywhere under the repo tree or in `groups/`.
-3. Grant the container access to that directory via the mount allowlist (`scripts/mount-allowlist.json` / `/manage-mounts`), so the broker script can `readFileSync` the `.pem` at runtime.
-4. Set the three required env vars for the agent group's container so they're available when the script runs:
-   - `GITHUB_APP_ID` — the App's numeric ID (App settings → "About").
-   - `GITHUB_APP_PRIVATE_KEY_PATH` — absolute path to the `.pem` from step 2.
-   - `GITHUB_APP_INSTALLATION_ID` — the installation ID, the trailing number in `github.com/settings/installations/<id>`.
-5. The agent mints a token on demand and uses it for GitHub API calls — the key itself stays on disk and out of context:
+- The container does **not** mount the repo's `scripts/` directory, so the broker isn't reachable at `scripts/github-app-token.mjs` from inside. You copy the script into a directory you *do* mount (below). (`node` itself is available — the agent image is `node:22-slim`.)
+- NanoClaw deliberately gives containers a minimal environment — there is **no per-group "set an env var" knob**. You supply the three required env vars (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`, `GITHUB_APP_INSTALLATION_ID`) by **sourcing a small vars file** (also mounted) at the top of the poll script.
 
-   ```bash
-   TOKEN=$(node scripts/github-app-token.mjs)
-   curl -H "Authorization: token $TOKEN" \
-     https://api.github.com/repos/owner/repo/pulls
-   ```
+So everything the broker needs — the script, the `.pem`, and the vars file — lives in one host directory you mount read-only into the container. Only the `.pem` is sensitive; the two numeric IDs and the key path are not, so keeping them in a plaintext vars file is fine.
 
-   Installation tokens are short-lived (one hour), so the agent re-runs the script whenever it needs a fresh one rather than caching it.
+#### Setup
+
+**1. Download the private key.** github.com/settings/apps → your app → "Private keys" → "Generate a private key". You'll get a `.pem`.
+
+**2. Put the broker, the key, and a vars file in a dedicated host directory.** Create a directory outside the repo (never under the repo tree or `groups/`) and drop all three there:
+
+```bash
+mkdir -p ~/gh-app && chmod 700 ~/gh-app
+cp scripts/github-app-token.mjs ~/gh-app/        # the broker, so it's reachable in-container
+mv ~/Downloads/your-app.*.pem ~/gh-app/github-app.pem
+chmod 600 ~/gh-app/github-app.pem
+```
+
+Create `~/gh-app/github-app.vars` (a plain shell file the poll script will `source`). Note `GITHUB_APP_PRIVATE_KEY_PATH` is the path **as seen inside the container** — mounts land under `/workspace/extra/` (see step 4):
+
+```bash
+# ~/gh-app/github-app.vars
+GITHUB_APP_ID=123456                                            # App settings → "About" → App ID
+GITHUB_APP_INSTALLATION_ID=78901234                             # trailing number in github.com/settings/installations/<id>
+GITHUB_APP_PRIVATE_KEY_PATH=/workspace/extra/gh-app/github-app.pem
+```
+
+> ⚠️ **Naming matters — the mount allowlist blocks certain substrings.** The mount security layer rejects any host path containing `.env`, `.secret`, `credentials`, `private_key`, `id_rsa`, `.ssh`, `.aws`, and similar (full list: `src/modules/mount-security/index.ts`). That's why the vars file is `github-app.vars`, **not** `github-app.env`, and the directory is `~/gh-app`, not `~/.nanoclaw-secrets`. Avoid those substrings in the directory name and both filenames or the mount is silently rejected.
+
+**3. Allow the directory in the mount allowlist.** The allowlist lives at `~/.config/nanoclaw/mount-allowlist.json` (outside the repo). Add `~/gh-app` as a read-only root:
+
+```json
+{
+  "allowedRoots": [
+    { "path": "~/gh-app", "allowReadWrite": false, "description": "GitHub App key + vars for token broker" }
+  ],
+  "blockedPatterns": [],
+  "nonMainReadOnly": true
+}
+```
+
+(Merge this into your existing allowlist if you already have one — don't overwrite other roots.)
+
+**4. Mount the directory into the agent group.** Step 3 only says the directory is *allowed* — you still have to attach it to the group's container config (the `additional_mounts` field). There's no dedicated `ncl` verb for this, so write it directly with the in-tree query wrapper, then restart so the new mount is picked up (mounts are bound at container spawn):
+
+```bash
+pnpm exec tsx scripts/q.ts data/v2.db \
+  "UPDATE container_configs SET additional_mounts='[{\"hostPath\":\"~/gh-app\",\"readonly\":true}]' WHERE agent_group_id='<agent-group-id>'"
+ncl groups restart --id <agent-group-id>
+```
+
+(`~` in `hostPath` is expanded when the mount is validated, so it's fine to store it literally. Run `ncl groups list` to find the agent group id.)
+
+The directory now appears inside the container at `/workspace/extra/gh-app/` — so the key is `/workspace/extra/gh-app/github-app.pem` and the vars file is `/workspace/extra/gh-app/github-app.vars`. Update `GITHUB_APP_PRIVATE_KEY_PATH` in `github-app.vars` to that full path, and use the matching paths in step 5. (Mounting the directory — rather than each file — means rotating the key or editing the vars file never requires touching the mount config again.)
+
+**5. Source the vars and mint a token in the poll script.** At the top of `poll-script.js`'s shell (or wherever the agent shells out), load the vars then call the broker:
+
+```bash
+set -a; . /workspace/extra/gh-app/github-app.vars; set +a
+TOKEN=$(node /workspace/extra/gh-app/github-app-token.mjs)
+curl -H "Authorization: token $TOKEN" \
+  https://api.github.com/repos/owner/repo/pulls
+```
+
+Installation tokens last one hour, so re-run the broker whenever you need a fresh one rather than caching it. The agent never reads the `.pem` — only the resulting token crosses into its context.
+
+#### Updating these values later
+
+| You want to change… | Do this | Restart needed? |
+|---|---|---|
+| `GITHUB_APP_ID` / `GITHUB_APP_INSTALLATION_ID` | Edit `~/gh-app/github-app.vars` on the host | No — the file is re-sourced on every poll |
+| The private key (rotation) | Replace `~/gh-app/github-app.pem` in place (keep the filename) | No — read fresh on each broker run |
+| Key filename / location, or which directory is mounted | Update `github-app.vars`, the allowlist, and the `additional_mounts` config (the `q.ts` write in step 4), then `ncl groups restart --id <group>` | **Yes** — mounts are bound at container spawn |
+
+The rule of thumb: editing the **contents** of an already-mounted file takes effect on the next run with no restart; changing **which paths are mounted** requires `ncl groups restart`.
 
 > **Note:** the bot identity you reference in `poll-script.js` and `agent-prompt.md` (step 3) must match the App you connected here — `<your-app-slug>[bot]` — regardless of whether you used the dashboard connection or this broker script.
 
