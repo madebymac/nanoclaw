@@ -98,6 +98,8 @@ ncl help
 |----------|-------|------------|
 | groups | list, get, create, update, delete, restart, config get/update, config add-mcp-server/remove-mcp-server, config add-package/remove-package | Agent groups (workspace, personality, container config) |
 | messaging-groups | list, get, create, update, delete | A single chat/channel on one platform |
+| channel-accounts | list, get, create, set-token, update, delete | A standalone bot identity (one Telegram @handle per agent). `id` is the `channel_type` (`<family>#<slug>`); bot tokens are write-only. See "Single-instance multi-bot" below. |
+| github-apps | list, get, create, delete | Self-hosted GitHub App bot identity per agent group — the second secrets store. See "GitHub App identities" below. |
 | wirings | list, get, create, update, delete | Links a messaging group to an agent group (session mode, triggers) |
 | users | list, get, create, update | Platform identities (`<channel>:<handle>`) |
 | roles | list, grant, revoke | Owner / admin privileges (global or scoped to an agent group) |
@@ -118,6 +120,23 @@ Trunk does not ship any specific channel adapter or non-default agent provider. 
 - **`providers` branch** — OpenCode (and any future non-default agent providers). Installed via `/add-opencode`.
 
 Each `/add-<name>` skill is idempotent: `git fetch origin <branch>` → copy module(s) into the standard paths → append a self-registration import to the relevant barrel → `pnpm install <pkg>@<pinned-version>` → build.
+
+### Single-instance multi-bot (channel accounts)
+
+One host process can run **many standalone bots — one Telegram @handle per agent**. The whole pipeline keys on `channel_type` (an opaque string), so each bot is modelled as its own `channel_type` value of the form `<family>#<slug>` (e.g. `telegram#andy`). That makes `(channel_type, platform_id)` unique per bot — the same person DMing bot A vs bot B lands in two distinct messaging groups — with no schema-wide rewrite.
+
+- `channel_accounts` table (migration 016): `id` IS the `channel_type`; `family` ('telegram') drives user-id namespacing; `agent_group_id` binds the bot to an agent; `bot_token` is a **host-side** secret (read to run the adapter, never injected into a container). `src/db/channel-accounts.ts`.
+- `src/channels/channel-family.ts` — `channelFamily()` / `channelAccountSlug()` / `channelType()`. A person is the same human across every bot, so **user ids and roles are namespaced by family** (`telegram:<handle>`), not by the per-bot account. Only a few spots need the family; everything else treats `channel_type` opaquely.
+- `src/channels/channel-registry.ts` — a registration's `factory` may now return an **array** of adapters; each is set up and registered under its own `channelType`, isolated so one bad bot token doesn't take down its siblings.
+- `src/channels/telegram.ts` — the factory builds one adapter per Telegram `channel_account` (own bot token + own poll loop). Falls back to a single legacy bot from `TELEGRAM_BOT_TOKEN` in `.env` when no accounts exist. On pairing, the chat is created under the bot's `channel_type` and **auto-wired** to the bound agent.
+
+Add an agent's bot: `ncl channel-accounts create --slug <name> --bot-token <token> --agent-group-id <id>` → **restart the host** (adapters instantiate at startup) → pair the chat from the bot's DM. Deferred: live add without restart.
+
+### GitHub App identities (second secrets store)
+
+OneCLI stays the agent-side credential vault (injects creds into containers at request time + approvals). But a **self-hosted GitHub App bot identity is a OneCLI Pro/paywalled feature**, so it lives in a small **host-side** store instead: `github_app_identities` (migration 016) holds the App id, installation id, and a filesystem **path** to a `chmod 600` private key — never the key itself. `ncl github-apps create --agent-group-id <id> --app-id <n> --installation-id <n> --private-key-path </abs/key.pem>`.
+
+At container spawn, `src/container-runner.ts` (`injectGithubAppToken`) calls `src/github-app-broker.ts` (`mintInstallationToken`) to mint a short-lived (~1h) installation token from the on-disk key and injects it as `GH_TOKEN`/`GITHUB_TOKEN`. The private key never enters the container or any LLM context; only the short-lived token crosses the boundary. Best-effort: a mint failure logs and the container still spawns (without the token). `scripts/github-app-token.mjs` is the standalone CLI equivalent.
 
 ## Self-Modification
 

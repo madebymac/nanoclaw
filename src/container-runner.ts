@@ -25,6 +25,8 @@ import { updateContainerConfigScalars, updateContainerConfigJson } from './db/co
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getGithubAppForAgentGroup } from './db/github-apps.js';
+import { mintInstallationToken } from './github-app-broker.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
@@ -63,6 +65,30 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
  * symptom and can flip the mode by hand. Throwing here would block all
  * sessions for the agent group on a transient OneCLI hiccup.
  */
+/**
+ * If the agent group has a bound GitHub App identity, mint a short-lived
+ * installation token on the host and append it to the container's env args as
+ * GH_TOKEN + GITHUB_TOKEN. Best-effort by design (see call site). The private
+ * key stays on the host filesystem; only the minted token crosses into the
+ * container, and it expires within ~1h.
+ */
+async function injectGithubAppToken(args: string[], agentGroupId: string): Promise<void> {
+  const identity = getGithubAppForAgentGroup(agentGroupId);
+  if (!identity) return;
+  const token = await mintInstallationToken({
+    appId: identity.app_id,
+    installationId: identity.installation_id,
+    privateKeyPath: identity.private_key_path,
+    apiUrl: identity.api_url,
+  });
+  if (!token) {
+    log.warn('GitHub App token unavailable; spawning without it', { agentGroupId });
+    return;
+  }
+  args.push('-e', `GH_TOKEN=${token}`, '-e', `GITHUB_TOKEN=${token}`);
+  log.info('GitHub App token injected', { agentGroupId, appId: identity.app_id });
+}
+
 async function ensureAgentSecretModeAll(identifier: string): Promise<void> {
   const baseUrl = ONECLI_URL.replace(/\/+$/, '');
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -569,6 +595,15 @@ async function buildContainerArgs(
       args.push('-e', `${key}=${value}`);
     }
   }
+
+  // GitHub App bot identity (the "second secrets store" for credentials OneCLI
+  // can't broker on its free plan). When this agent group has a bound GitHub
+  // App, the host mints a short-lived (~1h) installation token from the
+  // on-disk private key — the key never enters the container or any LLM
+  // context — and injects it as GH_TOKEN / GITHUB_TOKEN so `gh`, git, and the
+  // agent can act AS the app's bot identity. Best-effort: a mint failure logs
+  // and spawns without the token rather than blocking the container.
+  await injectGithubAppToken(args, agentGroup.id);
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
   // are routed through the agent vault for credential injection. The wiring
