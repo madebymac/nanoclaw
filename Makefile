@@ -69,9 +69,9 @@ deploy:
 	  else \
 	    echo "  WARN: OneCLI install dir missing, skipping bounce" >&2; rc=1; \
 	  fi; \
-	  echo "Reconciling OneCLI app connections"; \
+	  echo "Reconciling OneCLI app connections (best-effort)"; \
 	  scripts/onecli-reconcile-connections.sh \
-	    || { echo "  WARN: connection reconcile failed" >&2; rc=1; }; \
+	    || echo "  WARN: connection reconcile failed — best-effort, ignoring" >&2; \
 	  ids=$$(docker ps -q --filter label=nanoclaw-install=$(SLUG)); \
 	  if [ -n "$$ids" ]; then \
 	    echo "==> killing $$(echo $$ids | wc -w) agent container(s) (label nanoclaw-install=$(SLUG))"; \
