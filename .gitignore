@@ -10,6 +10,8 @@ dist/
 store/
 data/
 logs/
+# Legacy per-instance state from the old multi-instance layout
+instances/
 
 # Groups - per-installation state, not tracked
 groups/*
