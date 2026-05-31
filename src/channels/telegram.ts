@@ -267,9 +267,16 @@ interface TelegramBot {
   agentGroupId: string | null;
 }
 
+interface BuildOptions {
+  /** When false, bridge.setup is attempted once (no retry) — used for live add. */
+  retrySetup?: boolean;
+}
+
 /** Build a single Telegram adapter for one bot identity. */
-function buildTelegramAdapter(bot: TelegramBot): ChannelAdapter {
+function buildTelegramAdapter(bot: TelegramBot, opts: BuildOptions = {}): ChannelAdapter {
   const { channelType: chanType, token, agentGroupId } = bot;
+  // Live (interactive) add fails fast; startup retries through transient blips.
+  const setupAttempts = opts.retrySetup === false ? 1 : 5;
   const telegramAdapter = createTelegramAdapter({
     botToken: token,
     mode: 'polling',
@@ -312,7 +319,7 @@ function buildTelegramAdapter(bot: TelegramBot): ChannelAdapter {
         ...hostConfig,
         onInbound: createPairingInterceptor(botUsernamePromise, hostConfig.onInbound, token, chanType, agentGroupId),
       };
-      return withRetry(() => bridge.setup(intercepted), `bridge.setup(${chanType})`);
+      return withRetry(() => bridge.setup(intercepted), `bridge.setup(${chanType})`, setupAttempts);
     },
   };
   return wrapped;
@@ -355,12 +362,13 @@ registerChannelAdapter(TELEGRAM_FAMILY, {
   factory: () => {
     const bots = resolveTelegramBots();
     if (bots.length === 0) return null;
-    return bots.map(buildTelegramAdapter);
+    return bots.map((bot) => buildTelegramAdapter(bot));
   },
   // Live (restart-free) add: build one adapter for a single newly-created
-  // Telegram channel account.
-  buildAccountAdapter: (account) => {
+  // Telegram channel account. `fastFail` (interactive add) disables the
+  // bridge.setup retry so the operator's ncl call returns promptly.
+  buildAccountAdapter: (account, opts) => {
     const bot = accountToBot(account);
-    return bot ? buildTelegramAdapter(bot) : null;
+    return bot ? buildTelegramAdapter(bot, { retrySetup: !opts?.fastFail }) : null;
   },
 });

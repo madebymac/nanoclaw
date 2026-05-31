@@ -36,13 +36,17 @@ export async function startChannelAccountLive(account: ChannelAccount): Promise<
 
   let adapter;
   try {
-    adapter = registration.buildAccountAdapter({
-      id: account.id,
-      family,
-      label: account.label,
-      agent_group_id: account.agent_group_id,
-      bot_token: account.bot_token,
-    });
+    adapter = registration.buildAccountAdapter(
+      {
+        id: account.id,
+        family,
+        label: account.label,
+        agent_group_id: account.agent_group_id,
+        bot_token: account.bot_token,
+      },
+      // Interactive operator call — don't block on transient setup retries.
+      { fastFail: true },
+    );
   } catch (err) {
     log.error('buildAccountAdapter threw during live add', { id: account.id, err });
     return { started: false, reason: 'adapter build failed — restart the host to activate' };
