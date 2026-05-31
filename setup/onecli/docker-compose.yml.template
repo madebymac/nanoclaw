@@ -1,30 +1,25 @@
-# Per-instance OneCLI gateway compose file.
+# OneCLI gateway compose file.
 #
-# Rendered into ~/.onecli-<instance>/docker-compose.yml by setup/onecli.ts
-# and brought up with `docker compose --project-directory ~/.onecli-<instance>
-# -p onecli-<instance> up -d`.
+# Rendered into ~/.onecli/docker-compose.yml by setup/onecli.ts and brought
+# up with `docker compose --project-directory ~/.onecli -p onecli up -d`.
 #
 # Differences from the upstream onecli.sh installer's compose file:
 #   - No top-level `name:` field. The upstream file pins `name: onecli`,
-#     which compose treats as authoritative over the `-p` flag — that's
-#     what forced every instance install to collide on a single project.
-#     We control project name via `-p` instead so each instance gets
-#     its own (onecli-review, onecli-general, etc.).
-#   - No `container_name: onecli` on the onecli service. With it,
-#     compose would refuse to create a second container by the same
-#     name across projects. Without it, compose auto-names per project
-#     (onecli-review-onecli-1, onecli-general-onecli-1, etc.).
+#     which compose treats as authoritative over the `-p` flag. We control
+#     project name via `-p` instead.
+#   - No `container_name: onecli` on the onecli service. Without it,
+#     compose auto-names the container (onecli-onecli-1).
 #
-# Port + bind-address + version overrides come from the per-instance
-# .env that lives in the same directory and is auto-loaded by compose:
+# Bind-address + version overrides come from the .env that lives in the
+# same directory and is auto-loaded by compose:
 #   ONECLI_VERSION       image tag for ghcr.io/onecli/onecli (pin this).
 #   ONECLI_APP_PORT      host port for the web/API (default 10254).
 #   ONECLI_GATEWAY_PORT  host port for the gateway (default 10255).
 #   POSTGRES_PORT        host port for postgres (default 5432).
 #   ONECLI_BIND_HOST     host address to bind to (default 127.0.0.1).
 #   POSTGRES_USER/PASSWORD/DB defaults are fine; override if you need to.
-#   NEXTAUTH_SECRET      auth secret for the gateway. Generated once
-#                        per instance by setup/onecli.ts at first install.
+#   NEXTAUTH_SECRET      auth secret for the gateway. Generated once by
+#                        setup/onecli.ts at first install.
 
 services:
   postgres:

@@ -15,7 +15,6 @@
 import fs from 'fs';
 import path from 'path';
 
-import { readInstanceName } from '../src/instance-name.js';
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
 
@@ -39,14 +38,10 @@ export async function run(args: string[]): Promise<void> {
   }
 
   const projectRoot = process.cwd();
-  // Multi-instance: route writes to instances/<name>/.env when NCL_INSTANCE
-  // is set, so channel-install flows land tokens in the per-instance file
-  // that the host actually reads (matches src/config.ts ENV_FILE_PATH).
-  // Validated at ingestion so stateDir below can't escape instances/.
-  const instance = readInstanceName();
-  const stateDir = instance ? path.join(projectRoot, 'instances', instance) : projectRoot;
-  const envFile = path.join(stateDir, '.env');
-  fs.mkdirSync(stateDir, { recursive: true });
+  // Single-install: writes land in the project-root .env that the host
+  // reads (matches src/config.ts ENV_FILE_PATH).
+  const envFile = path.join(projectRoot, '.env');
+  fs.mkdirSync(projectRoot, { recursive: true });
 
   let content = '';
   if (fs.existsSync(envFile)) {
@@ -69,8 +64,8 @@ export async function run(args: string[]): Promise<void> {
 
   let synced = false;
   if (syncContainer) {
-    // Container mount path is also instance-scoped — instances/<name>/data/env/env.
-    const dataEnvDir = path.join(stateDir, 'data', 'env');
+    // Container mount path lives under the project-root data dir.
+    const dataEnvDir = path.join(projectRoot, 'data', 'env');
     fs.mkdirSync(dataEnvDir, { recursive: true });
     fs.copyFileSync(envFile, path.join(dataEnvDir, 'env'));
     synced = true;

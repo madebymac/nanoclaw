@@ -9,7 +9,6 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { readInstanceName } from '../src/instance-name.js';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
@@ -29,16 +28,10 @@ export async function run(_args: string[]): Promise<void> {
   const platform = getPlatform();
   const nodePath = getNodePath();
   const homeDir = os.homedir();
-  // Validated at ingestion — value flows raw into launchd plist XML,
-  // systemd `Environment=NCL_INSTANCE=...`, and on-disk filenames
-  // below, so it must be a known-safe charset.
-  const instance = readInstanceName();
-  // Per-instance state dir under instances/<name>/ when NCL_INSTANCE is set,
-  // else the project root (single-install layout). Logs follow the same
-  // dir so two instances on one checkout don't share a log file.
-  const stateDir = instance ? path.join(projectRoot, 'instances', instance) : projectRoot;
+  // Single-install: all state (logs, etc.) lives at the project root.
+  const stateDir = projectRoot;
 
-  log.info('Setting up service', { platform, nodePath, projectRoot, instance: instance || '(none)' });
+  log.info('Setting up service', { platform, nodePath, projectRoot });
 
   // Build first
   log.info('Building TypeScript');
@@ -77,9 +70,9 @@ export async function run(_args: string[]): Promise<void> {
   }
 
   if (platform === 'macos') {
-    setupLaunchd(projectRoot, nodePath, homeDir, instance, stateDir);
+    setupLaunchd(projectRoot, nodePath, homeDir, stateDir);
   } else if (platform === 'linux') {
-    setupLinux(projectRoot, nodePath, homeDir, instance, stateDir);
+    setupLinux(projectRoot, nodePath, homeDir, stateDir);
   } else {
     emitStatus('SETUP_SERVICE', {
       SERVICE_TYPE: 'unknown',
@@ -132,13 +125,11 @@ function setupLaunchd(
   projectRoot: string,
   nodePath: string,
   homeDir: string,
-  instance: string,
   stateDir: string,
 ): void {
   // Per-checkout service label so multiple NanoClaw installs can coexist
-  // without clobbering each other's plist. NCL_INSTANCE further discriminates
-  // when two instances run from one checkout.
-  const label = getLaunchdLabel(projectRoot, instance);
+  // without clobbering each other's plist.
+  const label = getLaunchdLabel(projectRoot);
   const plistPath = path.join(
     homeDir,
     'Library',
@@ -169,13 +160,7 @@ function setupLaunchd(
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
         <key>HOME</key>
-        <string>${homeDir}</string>${
-          instance
-            ? `
-        <key>NCL_INSTANCE</key>
-        <string>${instance}</string>`
-            : ''
-        }
+        <string>${homeDir}</string>
     </dict>
     <key>StandardOutPath</key>
     <string>${stateDir}/logs/nanoclaw.log</string>
@@ -238,16 +223,15 @@ function setupLinux(
   projectRoot: string,
   nodePath: string,
   homeDir: string,
-  instance: string,
   stateDir: string,
 ): void {
   const serviceManager = getServiceManager();
 
   if (serviceManager === 'systemd') {
-    setupSystemd(projectRoot, nodePath, homeDir, instance, stateDir);
+    setupSystemd(projectRoot, nodePath, homeDir, stateDir);
   } else {
     // WSL without systemd or other Linux without systemd
-    setupNohupFallback(projectRoot, nodePath, homeDir, instance, stateDir);
+    setupNohupFallback(projectRoot, nodePath, homeDir, stateDir);
   }
 }
 
@@ -297,11 +281,10 @@ function setupSystemd(
   projectRoot: string,
   nodePath: string,
   homeDir: string,
-  instance: string,
   stateDir: string,
 ): void {
   const runningAsRoot = isRoot();
-  const unitName = getSystemdUnit(projectRoot, instance);
+  const unitName = getSystemdUnit(projectRoot);
   const unitFileName = `${unitName}.service`;
 
   // Root uses system-level service, non-root uses user-level
@@ -320,7 +303,7 @@ function setupSystemd(
       log.warn(
         'systemd user session not available — falling back to nohup wrapper',
       );
-      setupNohupFallback(projectRoot, nodePath, homeDir, instance, stateDir);
+      setupNohupFallback(projectRoot, nodePath, homeDir, stateDir);
       return;
     }
     const unitDir = path.join(homeDir, '.config', 'systemd', 'user');
@@ -330,7 +313,7 @@ function setupSystemd(
   }
 
   const unit = `[Unit]
-Description=NanoClaw Personal Assistant${instance ? ` (${instance})` : ''}
+Description=NanoClaw Personal Assistant
 After=network.target
 
 [Service]
@@ -341,9 +324,7 @@ Restart=always
 RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin${
-    instance ? `\nEnvironment=NCL_INSTANCE=${instance}` : ''
-  }
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
 StandardOutput=append:${stateDir}/logs/nanoclaw.log
 StandardError=append:${stateDir}/logs/nanoclaw.error.log
 
@@ -451,19 +432,18 @@ function setupNohupFallback(
   projectRoot: string,
   nodePath: string,
   homeDir: string,
-  instance: string,
   stateDir: string,
 ): void {
   log.warn('No systemd detected — generating nohup wrapper script');
 
-  const wrapperName = instance ? `start-nanoclaw-${instance}.sh` : 'start-nanoclaw.sh';
-  const pidName = instance ? `nanoclaw-${instance}.pid` : 'nanoclaw.pid';
+  const wrapperName = 'start-nanoclaw.sh';
+  const pidName = 'nanoclaw.pid';
   const wrapperPath = path.join(projectRoot, wrapperName);
   const pidFile = path.join(projectRoot, pidName);
 
   const lines = [
     '#!/bin/bash',
-    `# ${wrapperName} — Start NanoClaw${instance ? ` (instance: ${instance})` : ''} without systemd`,
+    `# ${wrapperName} — Start NanoClaw without systemd`,
     `# To stop: kill \\$(cat ${pidFile})`,
     '',
     'set -euo pipefail',
@@ -481,7 +461,6 @@ function setupNohupFallback(
     'fi',
     '',
     'echo "Starting NanoClaw..."',
-    ...(instance ? [`export NCL_INSTANCE=${JSON.stringify(instance)}`] : []),
     `nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot + '/dist/index.js')} \\`,
     `  >> ${JSON.stringify(stateDir + '/logs/nanoclaw.log')} \\`,
     `  2>> ${JSON.stringify(stateDir + '/logs/nanoclaw.error.log')} &`,
