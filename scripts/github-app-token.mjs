@@ -27,7 +27,7 @@ if (!appId || !keyPath || !installationId) {
   process.exit(1);
 }
 
-const privateKey = readFileSync(keyPath, 'utf8');
+const privateKey = readFileSync(keyPath, 'utf8').trim();
 const now = Math.floor(Date.now() / 1000);
 
 const b64url = (obj) =>
@@ -48,14 +48,25 @@ const sig = sign.sign(privateKey, 'base64')
 
 const jwt = `${signingInput}.${sig}`;
 
-const res = await fetch(`${apiUrl}/app/installations/${installationId}/access_tokens`, {
-  method: 'POST',
-  headers: {
-    Authorization: `Bearer ${jwt}`,
-    Accept: 'application/vnd.github+json',
-    'X-GitHub-Api-Version': '2022-11-28',
-  },
-});
+const controller = new AbortController();
+const timeout = setTimeout(() => controller.abort(), 10_000);
+let res;
+try {
+  res = await fetch(`${apiUrl}/app/installations/${installationId}/access_tokens`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    signal: controller.signal,
+  });
+} catch (err) {
+  process.stderr.write(`GitHub API request failed: ${err.message}\n`);
+  process.exit(1);
+} finally {
+  clearTimeout(timeout);
+}
 
 if (!res.ok) {
   const body = await res.text().catch(() => '');
