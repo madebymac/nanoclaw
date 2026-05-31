@@ -195,6 +195,17 @@ export interface ChannelAccountSpec {
   bot_token: string | null;
 }
 
+/** Options for `buildAccountAdapter`. */
+export interface BuildAccountAdapterOptions {
+  /**
+   * Fail fast on setup errors instead of retrying. Set for live (restart-free)
+   * add via an interactive `ncl` command, where the operator is waiting on the
+   * call and a network blip shouldn't block it for tens of seconds. Startup
+   * keeps the resilient retry behaviour (omits this).
+   */
+  fastFail?: boolean;
+}
+
 /** Registration entry for a channel adapter. */
 export interface ChannelRegistration {
   factory: ChannelAdapterFactory;
@@ -204,7 +215,7 @@ export interface ChannelRegistration {
    * started live without a host restart. Returns null when the account lacks
    * credentials. Families that omit this can only pick up new bots at startup.
    */
-  buildAccountAdapter?: (account: ChannelAccountSpec) => ChannelAdapter | null;
+  buildAccountAdapter?: (account: ChannelAccountSpec, opts?: BuildAccountAdapterOptions) => ChannelAdapter | null;
   containerConfig?: {
     mounts?: Array<{ hostPath: string; containerPath: string; readonly: boolean }>;
     env?: Record<string, string>;

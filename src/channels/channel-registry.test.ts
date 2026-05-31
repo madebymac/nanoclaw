@@ -174,6 +174,31 @@ describe('channel registry', () => {
     expect(getChannelAdapter('telegram#live')).toBeUndefined();
   });
 
+  it('live add fails fast on NetworkError — no retry loop', async () => {
+    const { initChannelAdapters, startAdapterLive, getChannelAdapter } = await import('./channel-registry.js');
+    await initChannelAdapters(() => ({
+      conversations: [],
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    }));
+
+    const adapter = createMockAdapter('telegram#flaky');
+    const setup = vi.fn(async () => {
+      const err = new Error('transient');
+      err.name = 'NetworkError';
+      throw err;
+    });
+    adapter.setup = setup;
+
+    // Startup would retry NetworkError; the live path must not — it surfaces
+    // immediately so the operator's ncl call returns promptly.
+    await expect(startAdapterLive(adapter)).rejects.toThrow();
+    expect(setup).toHaveBeenCalledTimes(1);
+    expect(getChannelAdapter('telegram#flaky')).toBeUndefined();
+  });
+
   it('should skip adapters that return null (missing credentials)', async () => {
     const { registerChannelAdapter, initChannelAdapters, getActiveAdapters } = await import('./channel-registry.js');
 

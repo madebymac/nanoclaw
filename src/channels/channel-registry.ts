@@ -61,19 +61,22 @@ async function startOneAdapter(
   name: string,
   adapter: ChannelAdapter,
   setupFn: (adapter: ChannelAdapter) => ChannelSetup,
+  retryNetworkErrors = true,
 ): Promise<void> {
   const setup = setupFn(adapter);
   // Transient network failures during adapter init (e.g. Telegram deleteWebhook
   // hitting a DNS hiccup at boot) would otherwise leave the channel permanently
   // dead until manual restart. Retry only on NetworkError so misconfigs (bad
-  // tokens, etc.) still fail fast.
+  // tokens, etc.) still fail fast. Live (interactive) add passes
+  // retryNetworkErrors=false so the operator's `ncl` call doesn't block on a
+  // blip — they can just re-run it.
   let attempt = 0;
   while (true) {
     try {
       await adapter.setup(setup);
       break;
     } catch (err) {
-      if (isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
+      if (retryNetworkErrors && isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
         const delay = SETUP_RETRY_DELAYS_MS[attempt]!;
         log.warn('Channel adapter setup failed with network error, retrying', {
           channel: name,
@@ -143,7 +146,8 @@ export async function startAdapterLive(adapter: ChannelAdapter): Promise<void> {
   if (activeAdapters.has(adapter.channelType)) {
     await stopAdapterLive(adapter.channelType);
   }
-  await startOneAdapter(`live:${adapter.channelType}`, adapter, hostSetupFn);
+  // Fail fast — this runs on a synchronous operator `ncl` call.
+  await startOneAdapter(`live:${adapter.channelType}`, adapter, hostSetupFn, false);
 }
 
 /** Tear down and deregister a single active adapter by channel_type. No-op if absent. */
