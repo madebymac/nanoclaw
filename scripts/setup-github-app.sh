@@ -18,7 +18,7 @@ set -euo pipefail
 #     --agent-group-id <uuid> \
 #     --app-id <n> \
 #     --installation-id <n> \
-#     --key <path-to-downloaded.pem> \
+#     --key <path-to-downloaded.pem> \   # OR --key-stdin to paste it directly \
 #     --bot-login '<app-slug>[bot]' \
 #     [--slug <name>]          # key filename + label; default: agent folder \
 #     [--api-url <url>]        # GitHub Enterprise; default api.github.com \
@@ -38,7 +38,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 AGENT_GROUP_ID="" APP_ID="" INSTALLATION_ID="" KEY_SRC="" BOT_LOGIN=""
 SLUG="" API_URL="https://api.github.com" SECRETS_DIR="$HOME/.nanoclaw-secrets"
-VERIFY=0 REPLACE=0 RESTART=1 WRITE_NOTE=1
+VERIFY=0 REPLACE=0 RESTART=1 WRITE_NOTE=1 KEY_STDIN=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -46,6 +46,7 @@ while [ $# -gt 0 ]; do
     --app-id)         APP_ID="$2"; shift 2 ;;
     --installation-id) INSTALLATION_ID="$2"; shift 2 ;;
     --key)            KEY_SRC="$2"; shift 2 ;;
+    --key-stdin)      KEY_STDIN=1; shift ;;
     --bot-login)      BOT_LOGIN="$2"; shift 2 ;;
     --slug)           SLUG="$2"; shift 2 ;;
     --api-url)        API_URL="$2"; shift 2 ;;
@@ -62,8 +63,13 @@ done
 [ -n "$AGENT_GROUP_ID" ]  || die "--agent-group-id is required"
 [ -n "$APP_ID" ]          || die "--app-id is required"
 [ -n "$INSTALLATION_ID" ] || die "--installation-id is required"
-[ -n "$KEY_SRC" ]         || die "--key (path to the App private key .pem) is required"
-[ -f "$KEY_SRC" ]         || die "key file not found: $KEY_SRC"
+if [ "$KEY_STDIN" = "1" ]; then
+  [ -z "$KEY_SRC" ] || die "use either --key <path> or --key-stdin, not both"
+elif [ -n "$KEY_SRC" ]; then
+  [ -f "$KEY_SRC" ] || die "key file not found: $KEY_SRC"
+else
+  die "provide the App private key: --key <path-to.pem>, or --key-stdin (paste it)"
+fi
 have ncl                  || die "ncl not on PATH — run on the host with the service up"
 have node                 || die "node not on PATH"
 
@@ -73,10 +79,19 @@ FOLDER="$(printf '%s' "$GROUP_JSON" | node -e 'let s="";process.stdin.on("data",
 [ -n "$FOLDER" ] || die "no agent group found for id '$AGENT_GROUP_ID' (check: ncl groups list)"
 [ -n "$SLUG" ] || SLUG="$FOLDER"
 
-# 1. Store the private key (chmod 600) in the host secrets dir.
+# 1. Store the private key (chmod 600) in the host secrets dir. The key must
+#    persist here — the host re-reads it on every spawn to mint a fresh token.
 mkdir -p "$SECRETS_DIR"; chmod 700 "$SECRETS_DIR"
 KEY_DEST="$SECRETS_DIR/${SLUG}-github-app.pem"
-install -m 600 "$KEY_SRC" "$KEY_DEST"
+if [ "$KEY_STDIN" = "1" ]; then
+  echo "• paste the App private key (.pem), then press Ctrl-D:" >&2
+  ( umask 077; cat > "$KEY_DEST" )
+  [ -s "$KEY_DEST" ] || { rm -f "$KEY_DEST"; die "no key read from stdin"; }
+  grep -q 'BEGIN .*PRIVATE KEY' "$KEY_DEST" || { rm -f "$KEY_DEST"; die "stdin did not look like a PEM private key"; }
+else
+  install -m 600 "$KEY_SRC" "$KEY_DEST"
+fi
+chmod 600 "$KEY_DEST"
 echo "✓ key stored at $KEY_DEST (chmod 600)"
 
 # 2. Optional: validate by minting a real installation token (mirrors
