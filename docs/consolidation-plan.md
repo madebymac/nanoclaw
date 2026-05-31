@@ -144,6 +144,15 @@ GitHub-as-bot is cleanly handled by the broker + credential helper. Recommended:
 use the broker for GitHub, use the proxy for the Anthropic key and any
 agent-issued API calls.
 
+## Migration posture
+
+Downtime during migration is acceptable — agents can be torn down and set back
+up. This removes the need for any zero-downtime dance: Phase 4 can stop both
+instances, excise OneCLI, rebuild the container image, and bring the surviving
+instance(s) back up cold. Likewise the per-group config migration (Phase 3) and
+any DB changes can run against a stopped host rather than live. Re-pairing
+channels and re-seeding the owner after the cutover is expected, not a failure.
+
 ## Recommended phasing
 
 - **Phase 1 — GitHub App token broker.** ✅ Done, PR #53. Self-contained.
