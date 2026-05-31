@@ -36,6 +36,33 @@ A scheduled agent that automatically reviews open pull requests using Claude Opu
 - Enter your App ID and slug, upload the private key
 - Complete the OAuth flow
 
+### 2a. Alternative: bot identity without OneCLI Pro
+
+The OneCLI dashboard GitHub App connection (step 2) requires a Pro subscription on self-hosted installs. If you want bot identity on a free self-hosted setup, use the token broker script instead.
+
+**Why this approach:** The private key must never appear in the LLM's context window (it would be sent to the model provider and logged). The broker script reads the key from disk, generates a JWT, and exchanges it for a short-lived installation token. The agent calls the script and sees only the token.
+
+**Setup:**
+
+1. Download your GitHub App's private key (`.pem`) from github.com/settings/apps → your app → "Private keys".
+2. Store it outside the repo, in a path the agent container can read but that is never committed (e.g. `~/.nanoclaw-secrets/github-app.pem`). Lock it down: `chmod 600`. Do not place it anywhere under the repo tree or in `groups/`.
+3. Grant the container access to that directory via the mount allowlist (`scripts/mount-allowlist.json` / `/manage-mounts`), so the broker script can `readFileSync` the `.pem` at runtime.
+4. Set the three required env vars for the agent group's container so they're available when the script runs:
+   - `GITHUB_APP_ID` — the App's numeric ID (App settings → "About").
+   - `GITHUB_APP_PRIVATE_KEY_PATH` — absolute path to the `.pem` from step 2.
+   - `GITHUB_APP_INSTALLATION_ID` — the installation ID, the trailing number in `github.com/settings/installations/<id>`.
+5. The agent mints a token on demand and uses it for GitHub API calls — the key itself stays on disk and out of context:
+
+   ```bash
+   TOKEN=$(node scripts/github-app-token.mjs)
+   curl -H "Authorization: token $TOKEN" \
+     https://api.github.com/repos/owner/repo/pulls
+   ```
+
+   Installation tokens are short-lived (one hour), so the agent re-runs the script whenever it needs a fresh one rather than caching it.
+
+> **Note:** the bot identity you reference in `poll-script.js` and `agent-prompt.md` (step 3) must match the App you connected here — `<your-app-slug>[bot]` — regardless of whether you used the dashboard connection or this broker script.
+
 ### 3. Configure the files
 
 In `poll-script.js`:
