@@ -54,7 +54,7 @@ function buildAppJwt(appId: string, privateKey: string): string {
  * failure — callers treat a null token as "spawn without GitHub-App creds"
  * rather than blocking the container, mirroring OneCLI's best-effort posture.
  */
-export async function mintInstallationToken(creds: GithubAppCredentials): Promise<string | null> {
+export async function mintInstallationToken(creds: GithubAppCredentials, timeoutMs = 10_000): Promise<string | null> {
   const apiUrl = creds.apiUrl || 'https://api.github.com';
   let privateKey: string;
   try {
@@ -76,7 +76,7 @@ export async function mintInstallationToken(creds: GithubAppCredentials): Promis
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${apiUrl}/app/installations/${creds.installationId}/access_tokens`, {
       method: 'POST',

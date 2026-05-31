@@ -181,9 +181,30 @@ export type ChannelAdapterFactory = () =>
   | null
   | Promise<ChannelAdapter | ChannelAdapter[] | null>;
 
+/**
+ * A single channel-account (bot) spec, passed to `buildAccountAdapter` for
+ * live (restart-free) add. Mirrors the `channel_accounts` row but kept as a
+ * local shape so `adapter.ts` doesn't depend on the DB layer.
+ */
+export interface ChannelAccountSpec {
+  /** The channel_type this bot listens on, e.g. `telegram#andy`. */
+  id: string;
+  family: string;
+  label: string | null;
+  agent_group_id: string | null;
+  bot_token: string | null;
+}
+
 /** Registration entry for a channel adapter. */
 export interface ChannelRegistration {
   factory: ChannelAdapterFactory;
+  /**
+   * Build a single adapter for one channel account. Implemented by multi-bot
+   * families (e.g. Telegram) so a newly-created `channel_account` can be
+   * started live without a host restart. Returns null when the account lacks
+   * credentials. Families that omit this can only pick up new bots at startup.
+   */
+  buildAccountAdapter?: (account: ChannelAccountSpec) => ChannelAdapter | null;
   containerConfig?: {
     mounts?: Array<{ hostPath: string; containerPath: string; readonly: boolean }>;
     env?: Record<string, string>;

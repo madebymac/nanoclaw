@@ -30,7 +30,7 @@ import { upsertUser } from '../modules/permissions/db/users.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { sanitizeTelegramLegacyMarkdown } from './telegram-markdown-sanitize.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
+import type { ChannelAccountSpec, ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
 
 const TELEGRAM_FAMILY = 'telegram';
@@ -325,14 +325,30 @@ function buildTelegramAdapter(bot: TelegramBot): ChannelAdapter {
  */
 function resolveTelegramBots(): TelegramBot[] {
   const accounts = getChannelAccountsByFamily(TELEGRAM_FAMILY).filter((a) => a.bot_token);
-  if (accounts.length > 0) {
-    return accounts.map((a) => ({ channelType: a.id, token: a.bot_token!, agentGroupId: a.agent_group_id }));
-  }
+  const bots: TelegramBot[] = accounts.map((a) => ({
+    channelType: a.id,
+    token: a.bot_token!,
+    agentGroupId: a.agent_group_id,
+  }));
+
+  // Keep a legacy single-bot `.env` TELEGRAM_BOT_TOKEN working even AFTER
+  // channel accounts are added, so an existing install doesn't silently lose
+  // its original bot the moment a second one is created. Skipped only when the
+  // same token is already represented by an account — two pollers on one bot
+  // token would conflict at Telegram's getUpdates. Migrate the legacy bot into
+  // an account when convenient; until then it runs on channel_type 'telegram'.
   const env = readEnvFile(['TELEGRAM_BOT_TOKEN'], ENV_FILE_PATH);
-  if (env.TELEGRAM_BOT_TOKEN) {
-    return [{ channelType: legacyChannelType(TELEGRAM_FAMILY), token: env.TELEGRAM_BOT_TOKEN, agentGroupId: null }];
+  const legacyToken = env.TELEGRAM_BOT_TOKEN;
+  if (legacyToken && !bots.some((b) => b.token === legacyToken)) {
+    bots.push({ channelType: legacyChannelType(TELEGRAM_FAMILY), token: legacyToken, agentGroupId: null });
   }
-  return [];
+  return bots;
+}
+
+/** Turn a channel_account into a bot spec, or null if it has no token. */
+function accountToBot(account: ChannelAccountSpec): TelegramBot | null {
+  if (!account.bot_token) return null;
+  return { channelType: account.id, token: account.bot_token, agentGroupId: account.agent_group_id };
 }
 
 registerChannelAdapter(TELEGRAM_FAMILY, {
@@ -340,5 +356,11 @@ registerChannelAdapter(TELEGRAM_FAMILY, {
     const bots = resolveTelegramBots();
     if (bots.length === 0) return null;
     return bots.map(buildTelegramAdapter);
+  },
+  // Live (restart-free) add: build one adapter for a single newly-created
+  // Telegram channel account.
+  buildAccountAdapter: (account) => {
+    const bot = accountToBot(account);
+    return bot ? buildTelegramAdapter(bot) : null;
   },
 });

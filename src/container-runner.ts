@@ -75,12 +75,18 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 async function injectGithubAppToken(args: string[], agentGroupId: string): Promise<void> {
   const identity = getGithubAppForAgentGroup(agentGroupId);
   if (!identity) return;
-  const token = await mintInstallationToken({
-    appId: identity.app_id,
-    installationId: identity.installation_id,
-    privateKeyPath: identity.private_key_path,
-    apiUrl: identity.api_url,
-  });
+  // 5s (not the broker default 10s) — this is awaited inline on the spawn path,
+  // so a slow/unreachable GitHub shouldn't add much latency before the
+  // best-effort null path kicks in. The happy path is well under a second.
+  const token = await mintInstallationToken(
+    {
+      appId: identity.app_id,
+      installationId: identity.installation_id,
+      privateKeyPath: identity.private_key_path,
+      apiUrl: identity.api_url,
+    },
+    5_000,
+  );
   if (!token) {
     log.warn('GitHub App token unavailable; spawning without it', { agentGroupId });
     return;
