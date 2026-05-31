@@ -7,10 +7,9 @@ import { log } from './log.js';
  * do with the values. This keeps secrets out of the process environment
  * so they don't leak to child processes.
  *
- * `envFilePath` is required (no process.cwd() fallback). In multi-instance
- * mode the right file lives at instances/<name>/.env, not the project
- * root, so a silent fallback would silently make two instances share
- * tokens. Callers should pass `ENV_FILE_PATH` from src/config.ts.
+ * `envFilePath` is required (no process.cwd() fallback) so callers always
+ * resolve the project-root .env explicitly. Pass `ENV_FILE_PATH` from
+ * src/config.ts.
  */
 export function readEnvFile(keys: string[], envFilePath: string): Record<string, string> {
   let content: string;

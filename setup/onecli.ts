@@ -8,6 +8,10 @@
  *             an existing gateway, since re-running the installer rebinds
  *             the listener and breaks those consumers.
  *
+ * Single-install: one gateway under the fixed compose project name `onecli`,
+ * the fixed install dir `~/.onecli`, and the default OneCLI ports
+ * (10254 app / 10255 gateway / 5432 postgres).
+ *
  * Emits ONECLI_URL and polls /health so downstream steps (auth, service)
  * get a ready gateway.
  */
@@ -17,23 +21,26 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { readInstanceName } from '../src/instance-name.js';
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
 
 const LOCAL_BIN = path.join(os.homedir(), '.local', 'bin');
+
+// Fixed single-install layout.
+const COMPOSE_PROJECT = 'onecli';
+const INSTALL_DIR = path.join(os.homedir(), '.onecli');
+const APP_PORT = 10254;
 
 /**
  * Default docker bridge gateway IP on Linux. Used as the bind host so
  * containers spawned by nanoclaw can reach the gateway — `127.0.0.1`
  * from inside a child container is the container itself, not the host.
  * Operators with a non-default docker network can override by setting
- * ONECLI_BIND_HOST in their per-instance OneCLI .env before first install.
+ * ONECLI_BIND_HOST in their OneCLI .env before first install.
  *
  * Linux-only default. Docker Desktop on macOS/WSL doesn't expose a host
  * IP at 172.17.0.1 (host-gateway lives at host.docker.internal there), so
- * dev-mode operators running the instance flow off-Pi must override
- * ONECLI_BIND_HOST themselves.
+ * dev-mode operators running off-Pi must override ONECLI_BIND_HOST.
  */
 const DEFAULT_BIND_HOST = '172.17.0.1';
 
@@ -51,72 +58,8 @@ function readPersistedBindHost(installDir: string): string {
   return DEFAULT_BIND_HOST;
 }
 
-/**
- * Multi-instance support: when NCL_INSTANCE is set, OneCLI lives under its
- * own compose project + install dir + port triple. Without it, behaviour is
- * unchanged — single-install at the default compose project name "onecli".
- */
-function instanceContext(): {
-  name: string;
-  composeProject: string;
-  envFile: string;
-  installDir: string;
-  appPort: number | null;
-  gatewayPort: number | null;
-  postgresPort: number | null;
-  bindHost: string;
-} {
-  // Validated at ingestion — throws on '..', shell metachars, etc. so
-  // installDir below (which becomes ~/.onecli-${name} and is exported
-  // to a curl|sh installer via ONECLI_HOME) is always path-safe.
-  const name = readInstanceName();
-  const projectRoot = process.cwd();
-  if (!name) {
-    return {
-      name: '',
-      composeProject: 'onecli',
-      envFile: path.join(projectRoot, '.env'),
-      installDir: path.join(os.homedir(), '.onecli'),
-      appPort: null,
-      gatewayPort: null,
-      postgresPort: null,
-      bindHost: DEFAULT_BIND_HOST,
-    };
-  }
-  const envFile = path.join(projectRoot, 'instances', name, '.env');
-  // Port triple is already written into instances/<name>/.env by
-  // scripts/render-instance-env.sh — parse it back out so the upstream
-  // installer (and the legacy-cleanup probe) see the right numbers.
-  const appPort = parseEnvPort(envFile, 'ONECLI_URL');
-  const installDir = path.join(os.homedir(), `.onecli-${name}`);
-  return {
-    name,
-    composeProject: `onecli-${name}`,
-    envFile,
-    installDir,
-    appPort,
-    gatewayPort: appPort !== null ? appPort + 1 : null,
-    postgresPort: appPort !== null ? appPort + 2 : null,
-    // Bind host the gateway is (or will be) bound to. Read from the
-    // per-instance OneCLI .env if it exists (so operator overrides
-    // persist across deploys); otherwise the same default we use when
-    // we render that file in installInstanceGateway().
-    bindHost: readPersistedBindHost(installDir),
-  };
-}
-
-function parseEnvPort(envFile: string, key: string): number | null {
-  try {
-    const content = fs.readFileSync(envFile, 'utf-8');
-    const re = new RegExp(`^${key}=(.+)$`, 'm');
-    const m = re.exec(content);
-    if (!m) return null;
-    const url = m[1].trim().replace(/^["']|["']$/g, '');
-    const portMatch = url.match(/:(\d+)(?:\/|$)/);
-    return portMatch ? parseInt(portMatch[1], 10) : null;
-  } catch {
-    return null;
-  }
+function envFilePath(): string {
+  return path.join(process.cwd(), '.env');
 }
 
 function childEnv(): NodeJS.ProcessEnv {
@@ -184,7 +127,7 @@ function ensureShellProfilePath(): void {
   }
 }
 
-function writeEnvVar(name: string, value: string, envFile: string = path.join(process.cwd(), '.env')): void {
+function writeEnvVar(name: string, value: string, envFile: string = envFilePath()): void {
   fs.mkdirSync(path.dirname(envFile), { recursive: true });
   let content = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf-8') : '';
   const re = new RegExp(`^${name}=.*$`, 'm');
@@ -197,7 +140,7 @@ function writeEnvVar(name: string, value: string, envFile: string = path.join(pr
 }
 
 function writeEnvOnecliUrl(url: string, envFile?: string): void {
-  writeEnvVar('ONECLI_URL', url, envFile ?? path.join(process.cwd(), '.env'));
+  writeEnvVar('ONECLI_URL', url, envFile ?? envFilePath());
 }
 
 // Last-known-good CLI release. Used only if BOTH the upstream installer
@@ -214,32 +157,29 @@ function installOnecliCliOnly(): { stdout: string; ok: boolean } {
   return { stdout: upstream.stdout + (upstream.stderr ?? '') + '\n' + fallback.stdout, ok: fallback.ok };
 }
 
-function installOnecli(ctx: ReturnType<typeof instanceContext>): { stdout: string; ok: boolean } {
+function installOnecli(): { stdout: string; ok: boolean } {
   let stdout = '';
 
   // Gateway install — bypass the upstream onecli.sh installer entirely.
   //
   // Why bypass: the upstream installer ships a compose file with hardcoded
   // `name: onecli` + `container_name: onecli`. Compose treats `name:` as
-  // authoritative over the `-p` flag, so two installs on one host always
-  // collide on a single project. We need one gateway per nanoclaw instance
-  // (strong credential + failure isolation), so we ship our own compose
-  // template (setup/onecli/docker-compose.yml.template) with those fields
-  // removed and bring it up directly under -p onecli-<inst>.
+  // authoritative over the `-p` flag. We ship our own compose template
+  // (setup/onecli/docker-compose.yml.template) with those fields removed
+  // and bring it up directly under `-p onecli`.
   //
-  // Per-instance compose dir at ctx.installDir (e.g. ~/.onecli-review/):
+  // Install dir at INSTALL_DIR (~/.onecli/):
   //   docker-compose.yml  — rendered from the template
-  //   .env                — port triple, bind host, version, (optional NEXTAUTH_SECRET)
-  // pgdata + app-data live in named volumes scoped to project onecli-<inst>.
-  const gw = installInstanceGateway(ctx);
+  //   .env                — bind host, version, (optional NEXTAUTH_SECRET)
+  // pgdata + app-data live in named volumes scoped to project onecli.
+  const gw = installGateway();
   stdout += gw.stdout;
   if (!gw.ok) {
     log.error('OneCLI gateway compose-up failed', { stderr: gw.stderr });
     return { stdout: stdout + (gw.stderr ?? ''), ok: false };
   }
 
-  // CLI binary install. Host-global, not per-instance — once it's on
-  // PATH, every instance uses the same binary. Skip if already present.
+  // CLI binary install. Skip if already present.
   if (onecliVersion()) {
     stdout += `OneCLI CLI already installed (${onecliVersion()}); skipping\n`;
     return { stdout, ok: true };
@@ -268,66 +208,49 @@ function installOnecli(ctx: ReturnType<typeof instanceContext>): { stdout: strin
 }
 
 /**
- * Render the per-instance compose file + .env into ctx.installDir, then
- * `docker compose -p <project> up -d`. Idempotent: existing volumes /
+ * Render the compose file + .env into INSTALL_DIR, then
+ * `docker compose -p onecli up -d`. Idempotent: existing volumes /
  * containers are reused; subsequent runs are effectively a no-op when
  * everything is already running.
  *
- * NEXTAUTH_SECRET is generated once and persisted in the per-instance .env
- * so restarts don't invalidate sessions. POSTGRES_PASSWORD stays default
- * — postgres is project-scoped (volume + network), so the default
- * credential isn't shared across instances.
+ * NEXTAUTH_SECRET is generated once and persisted in the .env so restarts
+ * don't invalidate sessions. POSTGRES_PASSWORD stays default — postgres is
+ * project-scoped (volume + network).
  */
-function installInstanceGateway(
-  ctx: ReturnType<typeof instanceContext>,
-): { stdout: string; stderr?: string; ok: boolean } {
-  if (!ctx.name || ctx.appPort === null || ctx.gatewayPort === null || ctx.postgresPort === null) {
-    return {
-      stdout: '',
-      stderr: 'installInstanceGateway requires NCL_INSTANCE + a parsable per-instance .env',
-      ok: false,
-    };
-  }
+function installGateway(): { stdout: string; stderr?: string; ok: boolean } {
+  fs.mkdirSync(INSTALL_DIR, { recursive: true });
 
-  fs.mkdirSync(ctx.installDir, { recursive: true });
-
-  // Render the template into the per-instance dir. Done unconditionally so
+  // Render the template into the install dir. Done unconditionally so
   // template fixes propagate on the next deploy tick. The NEXTAUTH_SECRET
   // line is conditionally emitted below — see the comment near
   // hasGoogleOAuth for why we can't just leave it interpolating to "".
   const templatePath = path.join(process.cwd(), 'setup', 'onecli', 'docker-compose.yml.template');
-  const composePath = path.join(ctx.installDir, 'docker-compose.yml');
+  const composePath = path.join(INSTALL_DIR, 'docker-compose.yml');
   const template = fs.readFileSync(templatePath, 'utf-8');
 
-  // Per-instance .env. NEXTAUTH_SECRET is only meaningful in OAuth mode —
-  // recent OneCLI versions refuse to start when it's set (even to "")
-  // without GOOGLE_CLIENT_ID/SECRET. Default installs run in local mode,
-  // so we omit the secret unless the user has manually added Google OAuth
-  // creds to the existing .env. Any previously-persisted secret without
-  // matching OAuth creds is stripped to unblock the gateway. The compose
-  // template's NEXTAUTH_SECRET line is also conditionally rendered below,
-  // because `NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}` still injects the var
-  // as an empty string into the container, which OneCLI treats as "set".
+  // NEXTAUTH_SECRET is only meaningful in OAuth mode — recent OneCLI
+  // versions refuse to start when it's set (even to "") without
+  // GOOGLE_CLIENT_ID/SECRET. Default installs run in local mode, so we
+  // omit the secret unless the user has manually added Google OAuth creds
+  // to the existing .env. Any previously-persisted secret without matching
+  // OAuth creds is stripped to unblock the gateway. The compose template's
+  // NEXTAUTH_SECRET line is also conditionally rendered below, because
+  // `NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}` still injects the var as an
+  // empty string into the container, which OneCLI treats as "set".
   //
   // Google OAuth env vars and any other user-added lines are preserved
   // across redeploys — the writeback only owns the keys it explicitly sets.
-  const envPath = path.join(ctx.installDir, '.env');
+  const envPath = path.join(INSTALL_DIR, '.env');
   const existing = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
   const hasGoogleOAuth =
     /^GOOGLE_CLIENT_ID=.+$/m.test(existing) && /^GOOGLE_CLIENT_SECRET=.+$/m.test(existing);
   const persistedSecret = /^NEXTAUTH_SECRET=(.+)$/m.exec(existing)?.[1];
   const nextauthSecret = hasGoogleOAuth ? persistedSecret || randomSecret() : null;
-  // ctx.bindHost was already resolved from the same file (or
-  // DEFAULT_BIND_HOST). Re-using it here keeps the gateway bind and the
-  // ONECLI_URL written into instances/<name>/.env in lock-step.
-  const bindHost = ctx.bindHost;
+  const bindHost = readPersistedBindHost(INSTALL_DIR);
 
   const managedKeys = new Set([
     'ONECLI_VERSION',
     'ONECLI_BIND_HOST',
-    'ONECLI_APP_PORT',
-    'ONECLI_GATEWAY_PORT',
-    'POSTGRES_PORT',
     'NEXTAUTH_SECRET',
   ]);
   // Skip the previous auto-generated header (leading comment + blank
@@ -352,14 +275,10 @@ function installInstanceGateway(
 
   const envLines = [
     `# Auto-generated by setup/onecli.ts. Managed keys (rewritten every`,
-    `# deploy tick): ONECLI_VERSION, ONECLI_BIND_HOST, ONECLI_*_PORT,`,
-    `# POSTGRES_PORT, NEXTAUTH_SECRET. Anything else you add here is`,
-    `# preserved across redeploys.`,
+    `# deploy tick): ONECLI_VERSION, ONECLI_BIND_HOST, NEXTAUTH_SECRET.`,
+    `# Anything else you add here is preserved across redeploys.`,
     `ONECLI_VERSION=${ONECLI_GATEWAY_VERSION}`,
     `ONECLI_BIND_HOST=${bindHost}`,
-    `ONECLI_APP_PORT=${ctx.appPort}`,
-    `ONECLI_GATEWAY_PORT=${ctx.gatewayPort}`,
-    `POSTGRES_PORT=${ctx.postgresPort}`,
     ...(nextauthSecret ? [`NEXTAUTH_SECRET=${nextauthSecret}`] : []),
     ...preserved,
     '',
@@ -380,7 +299,7 @@ function installInstanceGateway(
     .join('\n');
   fs.writeFileSync(composePath, rendered);
 
-  const cmd = `docker compose --project-directory ${JSON.stringify(ctx.installDir)} -p ${JSON.stringify(ctx.composeProject)} up -d`;
+  const cmd = `docker compose --project-directory ${JSON.stringify(INSTALL_DIR)} -p ${JSON.stringify(COMPOSE_PROJECT)} up -d`;
   return runInstall(cmd);
 }
 
@@ -500,27 +419,7 @@ export async function run(args: string[]): Promise<void> {
   const reuse = args.includes('--reuse');
   const remoteUrlIdx = args.indexOf('--remote-url');
   const remoteUrl = remoteUrlIdx !== -1 ? args[remoteUrlIdx + 1] : null;
-  const ctx = instanceContext();
-  if (ctx.name) {
-    log.info('OneCLI setup for instance', {
-      instance: ctx.name,
-      composeProject: ctx.composeProject,
-      installDir: ctx.installDir,
-      appPort: ctx.appPort,
-    });
-    // appPort is only needed for the local-install path (installOnecli).
-    // --reuse and --remote-url legitimately point at gateways without a
-    // port in the URL (e.g. https://onecli.example.com), so parseEnvPort
-    // returns null — don't abort those flows here. The local-install
-    // branch below re-checks and bails with the same message if missing.
-    if (ctx.appPort === null && !reuse && !remoteUrl) {
-      log.error(
-        `Could not parse ONECLI_URL port from ${ctx.envFile}. ` +
-          `Run \`scripts/render-instance-env.sh ${ctx.name}\` to generate the per-instance .env, then re-run \`make install\`.`,
-      );
-      process.exit(1);
-    }
-  }
+  const envFile = envFilePath();
   ensureShellProfilePath();
 
   if (remoteUrl) {
@@ -546,7 +445,7 @@ export async function run(args: string[]): Promise<void> {
     } catch (err) {
       log.warn('onecli config set api-host failed', { err });
     }
-    writeEnvOnecliUrl(remoteUrl, ctx.envFile);
+    writeEnvOnecliUrl(remoteUrl, envFile);
     log.info('Wrote ONECLI_URL to .env', { url: remoteUrl });
     const remoteToken = process.env.NANOCLAW_ONECLI_API_TOKEN?.trim();
     if (remoteToken) {
@@ -562,8 +461,8 @@ export async function run(args: string[]): Promise<void> {
       } catch (err) {
         log.warn('onecli auth login failed', { err });
       }
-      writeEnvVar('ONECLI_API_KEY', remoteToken, ctx.envFile);
-      log.info('Wrote ONECLI_API_KEY to .env', { envFile: ctx.envFile });
+      writeEnvVar('ONECLI_API_KEY', remoteToken, envFile);
+      log.info('Wrote ONECLI_API_KEY to .env', { envFile });
     }
     const healthy = await pollHealth(remoteUrl, 5000);
     emitStatus('ONECLI', {
@@ -602,8 +501,8 @@ export async function run(args: string[]): Promise<void> {
       });
       process.exit(1);
     }
-    writeEnvOnecliUrl(url, ctx.envFile);
-    log.info('Reusing existing OneCLI', { url, envFile: ctx.envFile });
+    writeEnvOnecliUrl(url, envFile);
+    log.info('Reusing existing OneCLI', { url, envFile });
     const healthy = await pollHealth(url, 5000);
     emitStatus('ONECLI', {
       INSTALLED: true,
@@ -616,28 +515,9 @@ export async function run(args: string[]): Promise<void> {
     return;
   }
 
-  // Local-install path: per-instance ports are required. The earlier
-  // precheck skips this case when --reuse/--remote-url is set; here it's
-  // genuinely missing config.
-  if (ctx.name && ctx.appPort === null) {
-    // Distinguish "file missing entirely" from "file present but
-    // ONECLI_URL has no port" — different fix in each case.
-    if (!fs.existsSync(ctx.envFile)) {
-      log.error(
-        `Per-instance .env not found at ${ctx.envFile}. ` +
-          `Add "${ctx.name}" to INSTANCES in instances.conf and run \`make install\`, ` +
-          `or generate just this one with \`scripts/render-instance-env.sh ${ctx.name}\`.`,
-      );
-    } else {
-      log.error(
-        `ONECLI_URL in ${ctx.envFile} has no port — local install needs a localhost URL with an explicit port (e.g. http://127.0.0.1:10354). ` +
-          `If you meant to target a hosted remote gateway, re-run with \`--reuse\` or \`--remote-url ${process.env.ONECLI_URL || '<url>'}\` instead.`,
-      );
-    }
-    process.exit(1);
-  }
+  // Local-install path.
   log.info('Installing OneCLI gateway and CLI');
-  const res = installOnecli(ctx);
+  const res = installOnecli();
   if (!res.ok) {
     emitStatus('ONECLI', {
       INSTALLED: false,
@@ -658,32 +538,13 @@ export async function run(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  // For multi-instance: trust the configured port from instances/<name>/.env
-  // rather than whatever the installer printed (which might be the default
-  // even when the gateway honored our override). For single-install: parse
-  // the URL out of the installer output, as before.
-  let url: string | null;
-  if (ctx.name && ctx.appPort !== null) {
-    // bindHost matches what installInstanceGateway wrote into
-    // ~/.onecli-<name>/.env, so the URL we hand to the instance host
-    // resolves to the actual gateway's bind address. Previously hardcoded
-    // 127.0.0.1, which failed when the gateway binds to 172.17.0.1
-    // (default — so child containers can reach it via docker bridge).
-    url = `http://${ctx.bindHost}:${ctx.appPort}`;
-    log.info('Using configured instance OneCLI URL', { url, instance: ctx.name, bindHost: ctx.bindHost });
-  } else {
-    url = extractUrlFromOutput(res.stdout);
-  }
-  if (!url) {
-    emitStatus('ONECLI', {
-      INSTALLED: true,
-      STATUS: 'failed',
-      ERROR: 'could_not_resolve_api_host',
-      HINT: 'Inspect logs/setup.log for the install output.',
-      LOG: 'logs/setup.log',
-    });
-    process.exit(1);
-  }
+  // The gateway binds to the resolved bind host on the fixed app port.
+  // bindHost matches what installGateway wrote into ~/.onecli/.env so the
+  // URL resolves to the actual gateway's bind address (default 172.17.0.1
+  // so child containers can reach it via the docker bridge).
+  const bindHost = readPersistedBindHost(INSTALL_DIR);
+  const url = `http://${bindHost}:${APP_PORT}`;
+  log.info('Using OneCLI URL', { url, bindHost });
 
   try {
     execFileSync('onecli', ['config', 'set', 'api-host', url], {
@@ -694,15 +555,15 @@ export async function run(args: string[]): Promise<void> {
     log.warn('onecli config set api-host failed', { err });
   }
 
-  writeEnvOnecliUrl(url, ctx.envFile);
-  log.info('Wrote ONECLI_URL to .env', { url, envFile: ctx.envFile });
+  writeEnvOnecliUrl(url, envFile);
+  log.info('Wrote ONECLI_URL to .env', { url, envFile });
 
   const healthy = await pollHealth(url, 15000);
-  if (ctx.name && !healthy) {
+  if (!healthy) {
     log.error(
-      `OneCLI gateway for instance "${ctx.name}" is not responding at ${url}. ` +
-        `Check 'docker compose --project-directory ${ctx.installDir} -p ${ctx.composeProject} ps' ` +
-        `and 'docker compose --project-directory ${ctx.installDir} -p ${ctx.composeProject} logs' on the host.`,
+      `OneCLI gateway is not responding at ${url}. ` +
+        `Check 'docker compose --project-directory ${INSTALL_DIR} -p ${COMPOSE_PROJECT} ps' ` +
+        `and 'docker compose --project-directory ${INSTALL_DIR} -p ${COMPOSE_PROJECT} logs' on the host.`,
     );
   }
 

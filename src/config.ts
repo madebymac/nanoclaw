@@ -2,45 +2,18 @@ import os from 'os';
 import path from 'path';
 
 import { readEnvFile } from './env.js';
-import { readInstanceName } from './instance-name.js';
 import { getContainerImageBase, getDefaultContainerImage, getInstallSlug } from './install-slug.js';
 import { isValidTimezone } from './timezone.js';
 
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();
-// Loud-fail if someone launches the host (or a setup step) from inside an
-// instance dir — INSTANCE_ROOT below would otherwise resolve to
-// instances/<name>/instances/<name>/, silently shifting the whole layout.
-if (PROJECT_ROOT.includes(`${path.sep}instances${path.sep}`)) {
-  throw new Error(
-    `Refusing to start: process.cwd() (${PROJECT_ROOT}) is inside instances/. ` +
-      `Always launch from the repo root with NCL_INSTANCE=<name> in the environment.`,
-  );
-}
 const HOME_DIR = process.env.HOME || os.homedir();
 
-// Multi-instance: NCL_INSTANCE namespaces per-instance state under
-// instances/<name>/ so one checkout can run two distinct hosts (separate DBs,
-// separate groups, separate OneCLI, distinct systemd units). When unset, the
-// existing single-install layout at the project root is used unchanged.
-export const NCL_INSTANCE = readInstanceName();
-const INSTANCE_ROOT = NCL_INSTANCE ? path.resolve(PROJECT_ROOT, 'instances', NCL_INSTANCE) : PROJECT_ROOT;
-// Belt-and-braces: even though readInstanceName() rejects '..' / '/', assert
-// the resolved instance dir is still inside instances/ before any path
-// derived from it (STORE_DIR, GROUPS_DIR, DATA_DIR, ENV_FILE_PATH) leaves
-// this module.
-if (NCL_INSTANCE) {
-  const expectedPrefix = path.resolve(PROJECT_ROOT, 'instances') + path.sep;
-  if (!INSTANCE_ROOT.startsWith(expectedPrefix)) {
-    throw new Error(`INSTANCE_ROOT (${INSTANCE_ROOT}) resolved outside ${expectedPrefix} — refusing to start.`);
-  }
-}
-// Exported so channel adapters and provider configs can read tokens from
-// the right .env (instances/<name>/.env when NCL_INSTANCE is set, root
-// .env otherwise). Anything that calls readEnvFile() with no path
-// argument will silently fall back to process.cwd() and clobber across
-// instances — always pass ENV_FILE_PATH instead.
-export const ENV_FILE_PATH = NCL_INSTANCE ? path.join(INSTANCE_ROOT, '.env') : path.join(PROJECT_ROOT, '.env');
+// Single-install layout: all per-install state lives at the project root.
+// Exported so channel adapters and provider configs read tokens from the
+// project-root .env. Anything that calls readEnvFile() must pass
+// ENV_FILE_PATH so it doesn't silently fall back to process.cwd().
+export const ENV_FILE_PATH = path.join(PROJECT_ROOT, '.env');
 
 // Read config values from .env (falls back to process.env).
 const envConfig = readEnvFile(
@@ -55,9 +28,9 @@ export const ASSISTANT_HAS_OWN_NUMBER =
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
 export const SENDER_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'sender-allowlist.json');
-export const STORE_DIR = path.resolve(INSTANCE_ROOT, 'store');
-export const GROUPS_DIR = path.resolve(INSTANCE_ROOT, 'groups');
-export const DATA_DIR = path.resolve(INSTANCE_ROOT, 'data');
+export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
+export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
+export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
 // Per-checkout image tag so two installs on the same host don't share
 // `nanoclaw-agent:latest` and clobber each other on rebuild.

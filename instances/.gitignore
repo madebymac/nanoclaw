@@ -1,6 +1,0 @@
-# Per-instance state — never commit DBs, sessions, logs, or real .env files.
-# The example/ dir is checked in as a template.
-*
-!.gitignore
-!example/
-!example/**
