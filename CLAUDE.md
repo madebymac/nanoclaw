@@ -128,9 +128,10 @@ One host process can run **many standalone bots — one Telegram @handle per age
 - `channel_accounts` table (migration 016): `id` IS the `channel_type`; `family` ('telegram') drives user-id namespacing; `agent_group_id` binds the bot to an agent; `bot_token` is a **host-side** secret (read to run the adapter, never injected into a container). `src/db/channel-accounts.ts`.
 - `src/channels/channel-family.ts` — `channelFamily()` / `channelAccountSlug()` / `channelType()`. A person is the same human across every bot, so **user ids and roles are namespaced by family** (`telegram:<handle>`), not by the per-bot account. Only a few spots need the family; everything else treats `channel_type` opaquely.
 - `src/channels/channel-registry.ts` — a registration's `factory` may now return an **array** of adapters; each is set up and registered under its own `channelType`, isolated so one bad bot token doesn't take down its siblings.
-- `src/channels/telegram.ts` — the factory builds one adapter per Telegram `channel_account` (own bot token + own poll loop). Falls back to a single legacy bot from `TELEGRAM_BOT_TOKEN` in `.env` when no accounts exist. On pairing, the chat is created under the bot's `channel_type` and **auto-wired** to the bound agent.
+- `src/channels/telegram.ts` — the factory builds one adapter per Telegram `channel_account` (own bot token + own poll loop). A legacy single bot from `TELEGRAM_BOT_TOKEN` in `.env` keeps running as an **additional** adapter even after accounts are added (deduped by token, so two pollers never fight over one bot). On pairing, the chat is created under the bot's `channel_type` and **auto-wired** to the bound agent.
+- `src/channels/live-accounts.ts` + `channel-registry.ts` (`startAdapterLive`/`stopAdapterLive`) — **live, restart-free** add: `ncl channel-accounts create` starts the bot immediately, `set-token` restarts it with the new token, `delete` stops it. The `ncl` handlers run in-process (socket-server dispatch), so they reach the live registry directly.
 
-Add an agent's bot: `ncl channel-accounts create --slug <name> --bot-token <token> --agent-group-id <id>` → **restart the host** (adapters instantiate at startup) → pair the chat from the bot's DM. Deferred: live add without restart.
+Add an agent's bot: `ncl channel-accounts create --slug <name> --bot-token <token> --agent-group-id <id>` → pair the chat from the bot's DM. No host restart. Full operator runbook: [docs/adding-agents.md](docs/adding-agents.md).
 
 ### GitHub App identities (second secrets store)
 
@@ -326,6 +327,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | [docs/db-session.md](docs/db-session.md) | Per-session `inbound.db` + `outbound.db` schemas + seq parity |
 | [docs/agent-runner-details.md](docs/agent-runner-details.md) | Agent-runner internals + MCP tool interface |
 | [docs/isolation-model.md](docs/isolation-model.md) | Three-level channel isolation model |
+| [docs/adding-agents.md](docs/adding-agents.md) | Operator runbook: add an agent with its own standalone bot (+ optional GitHub App identity) |
 | [docs/setup-wiring.md](docs/setup-wiring.md) | What's wired, what's open in the setup flow |
 | [docs/architecture-diagram.md](docs/architecture-diagram.md) | Diagram version of the architecture |
 | [docs/build-and-runtime.md](docs/build-and-runtime.md) | Runtime split (Node host + Bun container), lockfiles, image build surface, CI, key invariants |

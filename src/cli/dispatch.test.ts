@@ -147,7 +147,18 @@ register({
   handler: async (args) => ({ id: (args as Record<string, unknown>).id, agent_group_id: 'g1' }),
 });
 
+// An approval-gated command carrying a secret arg — for redaction tests.
+register({
+  name: 'channel-accounts-create',
+  description: 'approval-gated command with a secret arg',
+  resource: 'channel-accounts',
+  access: 'approval',
+  parseArgs: (raw) => raw,
+  handler: async (args) => ({ echo: args }),
+});
+
 import { dispatch } from './dispatch.js';
+import { requestApproval } from '../modules/approvals/index.js';
 import type { CallerContext } from './frame.js';
 
 beforeEach(() => {
@@ -510,5 +521,34 @@ describe('CLI scope enforcement', () => {
       expect(resp.error.code).toBe('forbidden');
       expect(resp.error.message).toContain('not available in group scope');
     }
+  });
+});
+
+describe('approval message redaction', () => {
+  it('redacts secret arg values (bot_token) but keeps them in the executable payload', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Andy' });
+
+    const resp = await dispatch(
+      { id: 'r1', command: 'channel-accounts-create', args: { slug: 'andy', bot_token: 'SECRET123' } },
+      agentCtx(),
+    );
+
+    // The call is held for approval, not executed inline.
+    expect(resp.ok).toBe(false);
+
+    const mocked = vi.mocked(requestApproval);
+    expect(mocked).toHaveBeenCalledOnce();
+    const call = mocked.mock.calls[0][0] as unknown as {
+      question: string;
+      payload: { frame: { args: Record<string, unknown> } };
+    };
+    // Rendered approval message is sanitized…
+    expect(call.question).toContain('<redacted>');
+    expect(call.question).not.toContain('SECRET123');
+    expect(call.question).toContain('andy'); // non-secret args still rendered
+    // …but the executable payload still carries the real token.
+    expect(call.payload.frame.args.bot_token).toBe('SECRET123');
   });
 });

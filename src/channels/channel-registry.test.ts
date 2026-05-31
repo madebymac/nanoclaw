@@ -144,6 +144,36 @@ describe('channel registry', () => {
     expect(getChannelAdapter('telegram#good')).toBeDefined();
   });
 
+  it('adds, restarts, and removes an adapter live (no host restart)', async () => {
+    const { initChannelAdapters, startAdapterLive, stopAdapterLive, getChannelAdapter } =
+      await import('./channel-registry.js');
+
+    // Channels must be initialized first so the host setup fn is captured.
+    await initChannelAdapters(() => ({
+      conversations: [],
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    }));
+
+    // Live add.
+    const first = createMockAdapter('telegram#live');
+    await startAdapterLive(first);
+    expect(getChannelAdapter('telegram#live')).toBe(first);
+
+    // Live restart (e.g. token rotation): same channel_type tears down the old.
+    const teardown = vi.spyOn(first, 'teardown');
+    const second = createMockAdapter('telegram#live');
+    await startAdapterLive(second);
+    expect(teardown).toHaveBeenCalledOnce();
+    expect(getChannelAdapter('telegram#live')).toBe(second);
+
+    // Live stop.
+    await stopAdapterLive('telegram#live');
+    expect(getChannelAdapter('telegram#live')).toBeUndefined();
+  });
+
   it('should skip adapters that return null (missing credentials)', async () => {
     const { registerChannelAdapter, initChannelAdapters, getActiveAdapters } = await import('./channel-registry.js');
 

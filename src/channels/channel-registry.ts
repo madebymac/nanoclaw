@@ -21,9 +21,19 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const registry = new Map<string, ChannelRegistration>();
 const activeAdapters = new Map<string, ChannelAdapter>();
 
+// Captured from initChannelAdapters so live (restart-free) adds can set up a
+// new adapter with the same host wiring (onInbound/onAction/etc.) the
+// startup-time adapters got. Null until the host has initialized channels.
+let hostSetupFn: ((adapter: ChannelAdapter) => ChannelSetup) | null = null;
+
 /** Register a channel adapter factory. Called by channel modules on import. */
 export function registerChannelAdapter(name: string, registration: ChannelRegistration): void {
   registry.set(name, registration);
+}
+
+/** Look up a registration by channel name/family (used for live add). */
+export function getChannelRegistration(name: string): ChannelRegistration | undefined {
+  return registry.get(name);
 }
 
 /** Get a live adapter by channel type. */
@@ -93,6 +103,7 @@ async function startOneAdapter(
  * skipped without taking down its siblings.
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
+  hostSetupFn = setupFn;
   for (const [name, registration] of registry) {
     let produced: ChannelAdapter | ChannelAdapter[] | null;
     try {
@@ -115,6 +126,37 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
       }
     }
   }
+}
+
+/**
+ * Start (or restart) a single adapter live — no host restart. Used when an
+ * operator adds or re-tokenizes a channel account via `ncl`. If an adapter is
+ * already active on the same channel_type it is torn down first, so this is
+ * also the "rotate token" path. Throws if channels haven't been initialized
+ * yet (host still booting) or if setup fails — callers decide whether to
+ * surface a "restart to retry" hint.
+ */
+export async function startAdapterLive(adapter: ChannelAdapter): Promise<void> {
+  if (!hostSetupFn) {
+    throw new Error('channel adapters not initialized yet — cannot add live; restart the host');
+  }
+  if (activeAdapters.has(adapter.channelType)) {
+    await stopAdapterLive(adapter.channelType);
+  }
+  await startOneAdapter(`live:${adapter.channelType}`, adapter, hostSetupFn);
+}
+
+/** Tear down and deregister a single active adapter by channel_type. No-op if absent. */
+export async function stopAdapterLive(channelType: string): Promise<void> {
+  const adapter = activeAdapters.get(channelType);
+  if (!adapter) return;
+  try {
+    await adapter.teardown();
+  } catch (err) {
+    log.warn('Failed to tear down adapter on live stop', { channelType, err });
+  }
+  activeAdapters.delete(channelType);
+  log.info('Channel adapter stopped (live)', { channelType });
 }
 
 /** Tear down all active adapters. */

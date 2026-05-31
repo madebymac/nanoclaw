@@ -112,6 +112,14 @@ Or run `/customize` for guided changes.
 
 The codebase is small enough that Claude can safely modify it.
 
+### Adding more agents (one standalone bot each)
+
+A single NanoClaw process can run many agents, each with its own standalone
+Telegram bot @handle. To add one: create the agent group, register its bot
+token (`ncl channel-accounts create …`), and pair the chat — the new bot starts
+live, no restart. An agent can also act as a self-hosted GitHub App bot. See the
+step-by-step runbook in **[docs/adding-agents.md](docs/adding-agents.md)**.
+
 ## Contributing
 
 **Don't add features. Add skills.**

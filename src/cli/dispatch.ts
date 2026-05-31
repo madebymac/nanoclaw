@@ -14,6 +14,12 @@ import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './fr
 import { getResource } from './crud.js';
 import { lookup } from './registry.js';
 
+// Arg keys whose values must never be rendered into a human-facing approval
+// message (bot tokens, API keys, secrets). `private_key_path` is intentionally
+// NOT matched — it's a filesystem path, useful for the approver to see, not the
+// key itself.
+const SENSITIVE_ARG_KEY = /token|secret|password|passwd|api[_-]?key/i;
+
 export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<ResponseFrame> {
   let cmd = lookup(req.command);
 
@@ -109,8 +115,13 @@ export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<R
     const agentGroup = getAgentGroup(ctx.agentGroupId);
     const agentName = agentGroup?.name ?? ctx.agentGroupId;
 
+    // Redact secret-bearing arg values from the human-facing approval message
+    // so credentials (e.g. --bot-token) never land in an approver's chat
+    // history — the exact "credential in chat context" leak this avoids
+    // elsewhere. The executable payload (payload.frame.args) keeps the real
+    // values; only this rendered summary is sanitized.
     const argSummary = Object.entries(req.args)
-      .map(([k, v]) => `--${k} ${v}`)
+      .map(([k, v]) => `--${k} ${SENSITIVE_ARG_KEY.test(k) ? '<redacted>' : v}`)
       .join(' ');
 
     await requestApproval({
