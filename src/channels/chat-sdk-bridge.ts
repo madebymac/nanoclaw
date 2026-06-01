@@ -501,10 +501,24 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
-          );
+          const files = attachFiles ? { files: fileUploads } : {};
+          let result;
+          try {
+            result = await adapter.postMessage(tid, { markdown: chunk, ...files });
+          } catch (err) {
+            // A markdown-rendering adapter can reject a chunk whose generated
+            // markup is malformed for its parser (e.g. Telegram's legacy
+            // `Markdown` mode: "can't parse entities"). Without a fallback the
+            // delivery retries replay the same bad payload and the reply is
+            // dropped entirely — to the user the bot looks hung. Resend the
+            // chunk as raw text (no parse mode) so it still gets through, just
+            // without formatting.
+            log.warn('Markdown delivery failed; retrying chunk as plain text', {
+              adapter: adapter.name,
+              err: err instanceof Error ? err.message : String(err),
+            });
+            result = await adapter.postMessage(tid, { raw: chunk, ...files });
+          }
           if (i === 0) firstId = result?.id;
         }
         return firstId;
