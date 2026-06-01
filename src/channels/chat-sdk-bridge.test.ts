@@ -205,3 +205,49 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.markdown).toBe('plain hello');
   });
 });
+
+describe('createChatSdkBridge.deliver — markdown parse-failure fallback', () => {
+  // A markdown-rendering adapter (Telegram legacy `Markdown`) can reject a chunk
+  // with "can't parse entities". Without a fallback the delivery retries replay
+  // the same bad payload and the reply is dropped — the bot looks hung. The
+  // bridge must resend the chunk as raw text (no parse mode) so it gets through.
+
+  it('retries the chunk as raw text when the markdown post throws, preserving the body', async () => {
+    const calls: PostCall[] = [];
+    const postMessage = async (threadId: string, message: AdapterPostableMessage): Promise<RawMessage<unknown>> => {
+      calls.push({ threadId, message });
+      if (typeof message === 'object' && message !== null && 'markdown' in message) {
+        throw new Error("Bad Request: can't parse entities");
+      }
+      return { id: 'msg-raw', threadId, raw: {} };
+    };
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+
+    const id = await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { markdown: "use `--noproxy '*'` here" },
+    });
+
+    expect(id).toBe('msg-raw');
+    expect(calls).toHaveLength(2);
+    expect((calls[0].message as { markdown?: string }).markdown).toBe("use `--noproxy '*'` here");
+    expect((calls[1].message as { raw?: string }).raw).toBe("use `--noproxy '*'` here");
+  });
+
+  it('does not retry when the markdown post succeeds', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { markdown: 'all good' },
+    });
+    expect(calls).toHaveLength(1);
+    expect((calls[0].message as { markdown?: string }).markdown).toBe('all good');
+  });
+});
