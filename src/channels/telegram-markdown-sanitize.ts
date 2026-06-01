@@ -36,9 +36,23 @@ export function sanitizeTelegramLegacyMarkdown(input: string): string {
   text = text.replace(/\*\*([^*\n]+?)\*\*/g, '*$1*');
   text = text.replace(/__([^_\n]+?)__/g, '_$1_');
 
+  // Telegram's legacy Markdown parser does not allow nested entities, so a
+  // code span wrapped in emphasis (`*use `cmd` here*`) is rejected with
+  // "can't parse entities" and the whole message is silently dropped. (A
+  // literal `*`/`_` inside the wrapped code — e.g. `--noproxy '*'` — also
+  // unbalances the delimiter count below, but the wrap alone breaks parsing.)
+  // Detect an emphasis run that straddles a code placeholder and strip all
+  // emphasis so the message degrades to plain text instead of vanishing.
+  // Sibling code + emphasis (`see `cmd` and _this_`) is left intact because
+  // no single emphasis run contains a placeholder.
+  const codePlaceholder = `${PLACEHOLDER_PREFIX}\\d+${PLACEHOLDER_SUFFIX}`;
+  const emphasisWrapsCode =
+    new RegExp(`\\*[^*\\n]*${codePlaceholder}[^*\\n]*\\*`).test(text) ||
+    new RegExp(`_[^_\\n]*${codePlaceholder}[^_\\n]*_`).test(text);
+
   const starCount = (text.match(/\*/g) ?? []).length;
   const underCount = (text.match(/_/g) ?? []).length;
-  if (starCount % 2 !== 0 || underCount % 2 !== 0) {
+  if (emphasisWrapsCode || starCount % 2 !== 0 || underCount % 2 !== 0) {
     text = text.replace(/[*_]/g, '');
   }
 

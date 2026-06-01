@@ -75,4 +75,38 @@ describe('sanitizeTelegramLegacyMarkdown', () => {
     const input = '```\n---\n```';
     expect(sanitizeTelegramLegacyMarkdown(input)).toBe(input);
   });
+
+  it('strips emphasis that wraps an inline-code span (Telegram cannot nest entities)', () => {
+    // Telegram rejects `*...`code`...*` with "can't parse entities" and drops
+    // the message. Degrade to plain text, keep the code span intact.
+    const out = sanitizeTelegramLegacyMarkdown('**set `NO_PROXY=a,b` in config**');
+    expect(out).toBe('set `NO_PROXY=a,b` in config');
+  });
+
+  it('strips emphasis wrapping code even when the code holds a literal * (odd count)', () => {
+    const out = sanitizeTelegramLegacyMarkdown("**use `--noproxy '*'` here**");
+    expect(out).toBe("use `--noproxy '*'` here");
+  });
+
+  it('leaves sibling code + emphasis intact (no false positive)', () => {
+    const input = 'see `file_name` and _this_ here';
+    expect(sanitizeTelegramLegacyMarkdown(input)).toBe(input);
+  });
+
+  it('produces balanced delimiters for the real dropped reply', () => {
+    // Verbatim shape of the message Telegram rejected at byte offset 236.
+    const input =
+      'Good question:\n\n' +
+      "1. **My notes say to use `--noproxy '*'`** — see `CLAUDE.local.md`.\n\n" +
+      '2. **The fix: set `NO_PROXY=api.github.com,github.com` as an env var.** Works at the OS level.';
+    const out = sanitizeTelegramLegacyMarkdown(input);
+    expect(out).not.toContain('**');
+    // Code spans (and their literal *) survive untouched.
+    expect(out).toContain("`--noproxy '*'`");
+    expect(out).toContain('`NO_PROXY=api.github.com,github.com`');
+    // Outside code spans, no emphasis delimiters remain — so Telegram has no
+    // entity to choke on. (The only surviving `*` is the literal inside code.)
+    const outsideCode = out.replace(/`[^`\n]*`/g, '');
+    expect(outsideCode).not.toMatch(/[*_]/);
+  });
 });
