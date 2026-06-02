@@ -101,3 +101,56 @@ export async function mintInstallationToken(creds: GithubAppCredentials, timeout
     clearTimeout(timeout);
   }
 }
+
+/**
+ * Resolve the App's bot login (`<slug>[bot]`) by authenticating AS the App
+ * (JWT, not an installation token) and calling `GET /app`. Used to recognise
+ * the bot's own reviews/comments when scanning PRs. Returns null on any
+ * failure — callers treat that as "can't identify the bot, skip this tick".
+ */
+export async function fetchAppLogin(creds: GithubAppCredentials, timeoutMs = 10_000): Promise<string | null> {
+  const apiUrl = creds.apiUrl || 'https://api.github.com';
+  let privateKey: string;
+  try {
+    privateKey = readFileSync(creds.privateKeyPath, 'utf8').trim();
+  } catch (err) {
+    log.warn('GitHub App private key unreadable; cannot resolve app login', {
+      privateKeyPath: creds.privateKeyPath,
+      err,
+    });
+    return null;
+  }
+
+  let jwt: string;
+  try {
+    jwt = buildAppJwt(creds.appId, privateKey);
+  } catch (err) {
+    log.warn('GitHub App JWT signing failed; cannot resolve app login', { appId: creds.appId, err });
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${apiUrl}/app`, {
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      log.warn('GitHub App /app non-OK', { status: res.status, body: body.slice(0, 200) });
+      return null;
+    }
+    const json = (await res.json()) as { slug?: string };
+    return json.slug ? `${json.slug}[bot]` : null;
+  } catch (err) {
+    log.warn('GitHub App /app request failed', { err });
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
