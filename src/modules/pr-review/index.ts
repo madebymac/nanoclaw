@@ -33,6 +33,12 @@ const FETCH_TIMEOUT_MS = 10_000;
 
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
+// The bot login (`<app-slug>[bot]`), resolved once via fetchAppLogin and cached
+// for the process lifetime. Stays null after a transient failure (bad JWT,
+// network blip), so the next tick retries — intentional: the login is required
+// to recognise the bot's own reviews, and one extra GET /app per minute until
+// GitHub recovers is far cheaper than a sentinel that would disable reviewing
+// until a host restart.
 let appLoginCache: string | null = null;
 
 export function startPrReview(): void {
