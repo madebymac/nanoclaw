@@ -6,7 +6,7 @@
  * host does NOT review; it only delegates.
  */
 import { wakeContainer } from '../../container-runner.js';
-import { findSessionByAgentGroup, getSession } from '../../db/sessions.js';
+import { getSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { resolveSession, writeSessionMessage } from '../../session-manager.js';
 
@@ -38,11 +38,15 @@ function buildPrompt(pr: PullToReview): string {
 }
 
 /**
- * Resolve a session for the reviewer agent (its most-recent active session, or
- * a fresh agent-shared one if none exists), inject the review task, and wake.
+ * Resolve a session for the reviewer agent, inject the review task, and wake.
+ *
+ * Uses `agent-shared` resolution — a single session per agent group, or a fresh
+ * standalone one (messaging_group_id = null) if the agent has never run. This
+ * is the same target resolution the agent-to-agent router falls back to for
+ * system-initiated messages that have no originating chat.
  */
 export async function dispatchReview(agentGroupId: string, pr: PullToReview): Promise<void> {
-  const session = findSessionByAgentGroup(agentGroupId) ?? resolveSession(agentGroupId, null, null, 'agent-shared').session;
+  const { session } = resolveSession(agentGroupId, null, null, 'agent-shared');
 
   const id = `prr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   writeSessionMessage(agentGroupId, session.id, {
