@@ -10,6 +10,10 @@
  *     `./write-destinations.js` on every wake (guarded by `hasTable('agent_destinations')`).
  *   - `src/delivery.ts::deliverMessage` dynamically imports `./agent-route.js`
  *     when `msg.channel_type === 'agent'`.
+ *   - `src/delivery.ts::deliverMessage` dynamically imports `./group-bridge.js`
+ *     after a successful `chat` channel delivery, to mirror group posts into
+ *     co-resident agents sharing the same physical chat (platforms don't
+ *     deliver bot→bot). See `group-bridge.ts`.
  *
  * Without this module: `agent_destinations` table absent ⇒ container-runner
  * skips destination projection, ACL check in delivery skips, `create_agent`
