@@ -2,6 +2,10 @@
 
 All notable changes to NanoClaw will be documented in this file.
 
+## [Unreleased]
+
+- **Agents in a shared group chat can now hear each other.** When two agents (each its own bot) share one group chat, platforms like Telegram never deliver one bot's message to another bot — so the agents could see your messages but were deaf to each other. After an agent's group post is delivered to the platform (so you still see it), the host now mirrors it into every co-resident agent's inbox, attributed to the sender and addressed from that peer's own view of the group — so replies go back to the group and the whole exchange stays visible in the chat. The peer is woken using the same engagement rule as a human message (e.g. an `@peer`/`@all` mention under a `pattern` wiring), which both respects the operator's config and keeps two agents from ping-ponging endlessly. Only genuine group chats (`is_group=1`) bridge; per-bot DMs that merely share a `platform_id` never cross-feed. Requires the agent-to-agent module. See `src/modules/agent-to-agent/group-bridge.ts`.
+
 ## [2.0.64] - 2026-05-18
 
 - **`ncl destinations add` and `remove` through the approval flow now reach the receiver immediately.** Approved destinations weren't being projected into the receiving agent's local session state, so a freshly-added destination silently failed at `send_message` with `unknown destination`, and a removed destination stayed resolvable until the next container restart. Both now take effect the moment the approval executes. Direct (non-approval) calls were unaffected.

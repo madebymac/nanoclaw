@@ -488,6 +488,25 @@ async function deliverMessage(
 
   clearOutbox(session.agent_group_id, session.id, msg.id);
 
+  // Shared-group bridge: most platforms never deliver a bot's message to
+  // another bot in the same chat, so an agent posting in a group is invisible
+  // to a co-resident agent. After the message has landed on the platform
+  // (humans see it), mirror it into any co-resident agents' inboxes so they
+  // can actually receive it. Guarded by the agent-to-agent module — without
+  // it `agent_destinations` doesn't exist and multi-agent groups can't be
+  // wired anyway. Best-effort: a failure here must not fail a delivery that
+  // already succeeded, so swallow and log.
+  if (msg.kind === 'chat' && hasTable(getDb(), 'agent_destinations')) {
+    try {
+      const { bridgeGroupMessageToCoResidentAgents } = await import(
+        './modules/agent-to-agent/group-bridge.js'
+      );
+      await bridgeGroupMessageToCoResidentAgents(msg, session);
+    } catch (err) {
+      log.warn('Shared-group bridge failed (message already delivered to platform)', { id: msg.id, err });
+    }
+  }
+
   return platformMsgId;
 }
 
