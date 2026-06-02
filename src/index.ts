@@ -17,6 +17,7 @@ import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, st
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
 import { startSelfUpgrade, stopSelfUpgrade } from './self-upgrade.js';
+import { startPrReview, stopPrReview } from './modules/pr-review/index.js';
 import { log, installConsoleCapture } from './log.js';
 
 // Route stray console.* writes from third-party deps through our logger so
@@ -182,6 +183,9 @@ async function main(): Promise<void> {
   // 6b. Start self-upgrade poller.
   startSelfUpgrade();
 
+  // 6c. Start the PR-review cron (no-op unless PR_REVIEW_ENABLED).
+  startPrReview();
+
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
 
@@ -201,6 +205,7 @@ async function shutdown(signal: string): Promise<void> {
   stopDeliveryPolls();
   stopHostSweep();
   stopSelfUpgrade();
+  stopPrReview();
   await stopCliServer();
   try {
     await teardownChannelAdapters();
