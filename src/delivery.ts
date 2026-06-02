@@ -28,6 +28,25 @@ import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typ
 import type { OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
 
+/**
+ * Whether the agent-to-agent module is installed, resolved once and cached.
+ *
+ * `agent_destinations` either exists or it doesn't for the lifetime of the
+ * process — the table is created by a startup migration, and installing the
+ * module mid-run requires a host restart to apply that migration. So there's
+ * no need to hit `sqlite_master` on every chat delivery (the bridge check
+ * below runs on the common origin-chat path, where the ACL check is skipped).
+ * Cached lazily on first use rather than at import, since the DB isn't open
+ * yet at module-load time.
+ */
+let agentToAgentInstalledCache: boolean | null = null;
+function agentToAgentInstalled(): boolean {
+  if (agentToAgentInstalledCache === null) {
+    agentToAgentInstalledCache = hasTable(getDb(), 'agent_destinations');
+  }
+  return agentToAgentInstalledCache;
+}
+
 // Container is "running" only while a turn is in flight, so we can poll
 // aggressively without burning idle CPU. 200ms keeps worst-case detection
 // lag for an outbound row at one tick instead of a full second — the
@@ -379,7 +398,7 @@ async function deliverMessage(
   // `agent_destinations` table won't exist and `routeAgentMessage`'s permission
   // check will throw, which falls into the normal retry → mark-failed path.
   if (msg.channel_type === 'agent') {
-    if (!hasTable(getDb(), 'agent_destinations')) {
+    if (!agentToAgentInstalled()) {
       throw new Error(`agent-to-agent module not installed — cannot route message ${msg.id}`);
     }
     const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
@@ -413,7 +432,7 @@ async function deliverMessage(
     // doesn't exist and we permit all non-origin channel sends (the
     // origin-chat case is always allowed regardless). Inlined SQL instead
     // of importing `hasDestination` so core doesn't depend on the module.
-    if (!isOriginChat && hasTable(getDb(), 'agent_destinations')) {
+    if (!isOriginChat && agentToAgentInstalled()) {
       const row = getDb()
         .prepare(
           'SELECT 1 FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
@@ -496,7 +515,7 @@ async function deliverMessage(
   // it `agent_destinations` doesn't exist and multi-agent groups can't be
   // wired anyway. Best-effort: a failure here must not fail a delivery that
   // already succeeded, so swallow and log.
-  if (msg.kind === 'chat' && hasTable(getDb(), 'agent_destinations')) {
+  if (msg.kind === 'chat' && agentToAgentInstalled()) {
     try {
       const { bridgeGroupMessageToCoResidentAgents } = await import(
         './modules/agent-to-agent/group-bridge.js'

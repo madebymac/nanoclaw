@@ -30,14 +30,17 @@
  * what separates the two cases.
  */
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { getDb } from '../../db/connection.js';
-import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import {
+  getMessagingGroupAgents,
+  getMessagingGroupByPlatform,
+  getSiblingMessagingGroups,
+} from '../../db/messaging-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
 import { evaluateEngage } from '../../router.js';
 import { resolveSession, writeSessionMessage } from '../../session-manager.js';
-import type { MessagingGroup, Session } from '../../types.js';
+import type { Session } from '../../types.js';
 import { getDestinationByTarget } from './db/agent-destinations.js';
 
 export interface BridgeableMessage {
@@ -77,9 +80,7 @@ export async function bridgeGroupMessageToCoResidentAgents(
   if (!senderMg || senderMg.is_group !== 1) return;
 
   // Sibling messaging groups = the same physical chat, seen through other bots.
-  const siblings = getDb()
-    .prepare('SELECT * FROM messaging_groups WHERE platform_id = ? AND id != ? AND is_group = 1')
-    .all(msg.platform_id, senderMg.id) as MessagingGroup[];
+  const siblings = getSiblingMessagingGroups(msg.platform_id, senderMg.id);
   if (siblings.length === 0) return;
 
   const senderName = getAgentGroup(senderSession.agent_group_id)?.name ?? senderSession.agent_group_id;
@@ -98,6 +99,12 @@ export async function bridgeGroupMessageToCoResidentAgents(
       const engages = evaluateEngage(wiring, text, false, sib, null);
       if (!engages && wiring.ignored_message_policy !== 'accumulate') continue;
 
+      // Reached only when the peer engages OR its wiring is `accumulate`.
+      // resolveSession may materialise a session here even for a non-engaging
+      // accumulate message (trigger=0, no wake below) — that's intentional:
+      // `accumulate` operators want silent context to build up so it's present
+      // when the agent does later engage. `drop` wirings already `continue`d
+      // above, so a session is never created just to throw the message away.
       const { session: target } = resolveSession(wiring.agent_group_id, sib.id, null, wiring.session_mode);
 
       // Prefer what the receiver already calls the sender (its destination

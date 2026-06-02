@@ -38,6 +38,19 @@ export function getMessagingGroupByPlatform(channelType: string, platformId: str
 }
 
 /**
+ * Other group messaging_groups that share the same physical chat — i.e. the
+ * same `platform_id` (and `is_group=1`) but a different `channel_type`,
+ * excluding `excludeId`. This is how a single group chat with multiple bots is
+ * modelled: one messaging_groups row per bot, all keyed to the same chat id.
+ * Used by the shared-group bridge to find an agent's co-resident peers.
+ */
+export function getSiblingMessagingGroups(platformId: string, excludeId: string): MessagingGroup[] {
+  return getDb()
+    .prepare('SELECT * FROM messaging_groups WHERE platform_id = ? AND id != ? AND is_group = 1')
+    .all(platformId, excludeId) as MessagingGroup[];
+}
+
+/**
  * Combined lookup for the router's fast-drop path. Returns the messaging
  * group (if it exists) and a count of wired agents in one query — lets
  * `routeInbound` short-circuit messages for unwired / unknown channels
