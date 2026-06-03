@@ -3,7 +3,7 @@
  * Spawns agent containers with session folder + agent group folder mounts.
  * The container runs the v2 agent-runner which polls the session DB.
  */
-import { ChildProcess, execFileSync, execSync, spawn } from 'child_process';
+import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -111,6 +111,25 @@ async function injectGithubAppToken(args: string[], agentGroupId: string): Promi
  * non-interactive bash subshell, so subsequent git/gh/curl calls pick up the
  * new token without a container restart. See #66.
  */
+/** Write `input` to a container via docker exec, returns a promise (non-blocking). */
+function dockerExecWrite(containerName: string, shellCmd: string, input: string, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(CONTAINER_RUNTIME_BIN, ['exec', '-i', containerName, 'sh', '-c', shellCmd]);
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`docker exec timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`docker exec exited with code ${code}`));
+    });
+    child.stdin?.write(input);
+    child.stdin?.end();
+  });
+}
+
 async function refreshGithubTokenInContainer(
   agentGroupId: string,
   entry: { containerName: string; tokenMintedAt?: number },
@@ -119,36 +138,44 @@ async function refreshGithubTokenInContainer(
   const age = Date.now() - entry.tokenMintedAt;
   if (age < GH_TOKEN_LIFETIME_MS - GH_TOKEN_REFRESH_THRESHOLD_MS) return;
 
-  const identity = getGithubAppForAgentGroup(agentGroupId);
-  if (!identity) return;
-
-  const token = await mintInstallationToken(
-    {
-      appId: identity.app_id,
-      installationId: identity.installation_id,
-      privateKeyPath: identity.private_key_path,
-      apiUrl: identity.api_url,
-    },
-    5_000,
-  );
-  if (!token) {
-    log.warn('GitHub App token refresh failed; container keeps expired token', {
-      agentGroupId,
-      containerName: entry.containerName,
-    });
-    return;
-  }
+  // Deduplicate: two messages arriving in the same tick both pass the age
+  // check. Guard with a per-container in-flight set (mirrors wakePromises).
+  if (refreshingContainers.has(entry.containerName)) return;
+  refreshingContainers.add(entry.containerName);
 
   try {
-    execFileSync(
-      CONTAINER_RUNTIME_BIN,
-      ['exec', '-i', entry.containerName, 'sh', '-c', 'cat > /tmp/.gh-token && chmod 600 /tmp/.gh-token'],
-      { input: token, timeout: 5_000 },
+    const identity = getGithubAppForAgentGroup(agentGroupId);
+    if (!identity) return;
+
+    const token = await mintInstallationToken(
+      {
+        appId: identity.app_id,
+        installationId: identity.installation_id,
+        privateKeyPath: identity.private_key_path,
+        apiUrl: identity.api_url,
+      },
+      5_000,
+    );
+    if (!token) {
+      log.warn('GitHub App token refresh failed; container keeps expired token', {
+        agentGroupId,
+        containerName: entry.containerName,
+      });
+      return;
+    }
+
+    await dockerExecWrite(
+      entry.containerName,
+      'cat > /tmp/.gh-token && chmod 600 /tmp/.gh-token',
+      token,
+      5_000,
     );
     entry.tokenMintedAt = Date.now();
     log.info('GitHub App token refreshed in container', { agentGroupId, containerName: entry.containerName });
   } catch (err) {
     log.warn('GitHub App token refresh docker exec failed', { agentGroupId, containerName: entry.containerName, err });
+  } finally {
+    refreshingContainers.delete(entry.containerName);
   }
 }
 
@@ -292,6 +319,9 @@ export function fixProxyGatewayPort(args: string[], onecliUrl: string): void {
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string; tokenMintedAt?: number }>();
+
+/** Containers with a token refresh already in-flight (deduplicates concurrent wakes). */
+const refreshingContainers = new Set<string>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
