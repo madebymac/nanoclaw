@@ -3,7 +3,7 @@
  * Spawns agent containers with session folder + agent group folder mounts.
  * The container runs the v2 agent-runner which polls the session DB.
  */
-import { ChildProcess, execSync, spawn } from 'child_process';
+import { ChildProcess, execFileSync, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -65,16 +65,23 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
  * symptom and can flip the mode by hand. Throwing here would block all
  * sessions for the agent group on a transient OneCLI hiccup.
  */
+// GitHub App installation tokens expire after ~1h. Refresh when within 5m of
+// expiry so long-lived sessions don't silently lose GitHub access. See #66.
+const GH_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
+const GH_TOKEN_REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
+
 /**
  * If the agent group has a bound GitHub App identity, mint a short-lived
  * installation token on the host and append it to the container's env args as
  * GH_TOKEN + GITHUB_TOKEN. Best-effort by design (see call site). The private
  * key stays on the host filesystem; only the minted token crosses into the
  * container, and it expires within ~1h.
+ *
+ * Returns the mint timestamp on success (used to track token age for refresh).
  */
-async function injectGithubAppToken(args: string[], agentGroupId: string): Promise<void> {
+async function injectGithubAppToken(args: string[], agentGroupId: string): Promise<number | undefined> {
   const identity = getGithubAppForAgentGroup(agentGroupId);
-  if (!identity) return;
+  if (!identity) return undefined;
   // 5s (not the broker default 10s) — this is awaited inline on the spawn path,
   // so a slow/unreachable GitHub shouldn't add much latency before the
   // best-effort null path kicks in. The happy path is well under a second.
@@ -89,10 +96,60 @@ async function injectGithubAppToken(args: string[], agentGroupId: string): Promi
   );
   if (!token) {
     log.warn('GitHub App token unavailable; spawning without it', { agentGroupId });
-    return;
+    return undefined;
   }
   args.push('-e', `GH_TOKEN=${token}`, '-e', `GITHUB_TOKEN=${token}`);
   log.info('GitHub App token injected', { agentGroupId, appId: identity.app_id });
+  return Date.now();
+}
+
+/**
+ * Refresh the GitHub App token in a running container when near expiry.
+ *
+ * Writes a fresh token to /tmp/.gh-token inside the container via docker exec.
+ * The BASH_ENV hook (created at container startup) reads that file on every
+ * non-interactive bash subshell, so subsequent git/gh/curl calls pick up the
+ * new token without a container restart. See #66.
+ */
+async function refreshGithubTokenInContainer(
+  agentGroupId: string,
+  entry: { containerName: string; tokenMintedAt?: number },
+): Promise<void> {
+  if (!entry.tokenMintedAt) return;
+  const age = Date.now() - entry.tokenMintedAt;
+  if (age < GH_TOKEN_LIFETIME_MS - GH_TOKEN_REFRESH_THRESHOLD_MS) return;
+
+  const identity = getGithubAppForAgentGroup(agentGroupId);
+  if (!identity) return;
+
+  const token = await mintInstallationToken(
+    {
+      appId: identity.app_id,
+      installationId: identity.installation_id,
+      privateKeyPath: identity.private_key_path,
+      apiUrl: identity.api_url,
+    },
+    5_000,
+  );
+  if (!token) {
+    log.warn('GitHub App token refresh failed; container keeps expired token', {
+      agentGroupId,
+      containerName: entry.containerName,
+    });
+    return;
+  }
+
+  try {
+    execFileSync(
+      CONTAINER_RUNTIME_BIN,
+      ['exec', '-i', entry.containerName, 'sh', '-c', 'cat > /tmp/.gh-token && chmod 600 /tmp/.gh-token'],
+      { input: token, timeout: 5_000 },
+    );
+    entry.tokenMintedAt = Date.now();
+    log.info('GitHub App token refreshed in container', { agentGroupId, containerName: entry.containerName });
+  } catch (err) {
+    log.warn('GitHub App token refresh docker exec failed', { agentGroupId, containerName: entry.containerName, err });
+  }
 }
 
 async function ensureAgentSecretModeAll(identifier: string): Promise<void> {
@@ -234,7 +291,7 @@ export function fixProxyGatewayPort(args: string[], onecliUrl: string): void {
 }
 
 /** Active containers tracked by session ID. */
-const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+const activeContainers = new Map<string, { process: ChildProcess; containerName: string; tokenMintedAt?: number }>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -267,8 +324,10 @@ export function isContainerRunning(sessionId: string): boolean {
  * can branch on the boolean.
  */
 export function wakeContainer(session: Session): Promise<boolean> {
-  if (activeContainers.has(session.id)) {
+  const running = activeContainers.get(session.id);
+  if (running) {
     log.debug('Container already running', { sessionId: session.id });
+    void refreshGithubTokenInContainer(session.agent_group_id, running);
     return Promise.resolve(true);
   }
   const existing = wakePromises.get(session.id);
@@ -320,7 +379,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   const agentIdentifier = agentGroup.id;
-  const args = await buildContainerArgs(
+  const { args, githubTokenMintedAt } = await buildContainerArgs(
     mounts,
     containerName,
     agentGroup,
@@ -340,7 +399,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  activeContainers.set(session.id, { process: container, containerName });
+  activeContainers.set(session.id, { process: container, containerName, tokenMintedAt: githubTokenMintedAt });
   markContainerRunning(session.id);
 
   // Log stderr
@@ -588,7 +647,7 @@ async function buildContainerArgs(
   provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
-): Promise<string[]> {
+): Promise<{ args: string[]; githubTokenMintedAt: number | undefined }> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
   // Environment — only vars read by code we don't own.
@@ -609,7 +668,7 @@ async function buildContainerArgs(
   // context — and injects it as GH_TOKEN / GITHUB_TOKEN so `gh`, git, and the
   // agent can act AS the app's bot identity. Best-effort: a mint failure logs
   // and spawns without the token rather than blocking the container.
-  await injectGithubAppToken(args, agentGroup.id);
+  const githubTokenMintedAt = await injectGithubAppToken(args, agentGroup.id);
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
   // are routed through the agent vault for credential injection. The wiring
@@ -660,9 +719,29 @@ async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  args.push('-c', 'exec bun run /app/src/index.ts');
+  // Seed /tmp/.gh-token and create the BASH_ENV hook so every non-interactive
+  // bash subshell (git, gh, curl invoked by the agent) transparently picks up
+  // a refreshed GH_TOKEN written by the host via docker exec. See #66.
+  args.push(
+    '-c',
+    `if [ -n "$GH_TOKEN" ]; then
+  printf '%s' "$GH_TOKEN" > /tmp/.gh-token
+  chmod 600 /tmp/.gh-token
+fi
+cat > /tmp/.gh-token-env << 'HOOKEOF'
+if [ -f /tmp/.gh-token ]; then
+  read -r _nanoclaw_gh_t < /tmp/.gh-token 2>/dev/null || true
+  if [ -n "$_nanoclaw_gh_t" ]; then
+    export GH_TOKEN="$_nanoclaw_gh_t"
+    export GITHUB_TOKEN="$_nanoclaw_gh_t"
+  fi
+  unset _nanoclaw_gh_t
+fi
+HOOKEOF
+exec bun run /app/src/index.ts`,
+  );
 
-  return args;
+  return { args, githubTokenMintedAt };
 }
 
 /** Build a per-agent-group Docker image with custom packages. */

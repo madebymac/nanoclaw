@@ -119,6 +119,13 @@ RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
+# ---- GitHub App token refresh ------------------------------------------------
+# BASH_ENV is sourced by every non-interactive bash subshell. The entrypoint
+# writes the hook script to this path at startup (and the host refreshes
+# /tmp/.gh-token via docker exec on each wake), so GH_TOKEN stays current
+# across long-lived sessions without a container restart. See #66.
+ENV BASH_ENV=/tmp/.gh-token-env
+
 # ---- Workspace + permissions -------------------------------------------------
 RUN mkdir -p /workspace/group /workspace/extra && \
     chown -R node:node /workspace && \
