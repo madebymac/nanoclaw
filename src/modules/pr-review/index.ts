@@ -1,25 +1,24 @@
 /**
- * PR-review cron — periodic, host-side scan for open PRs the review bot hasn't
+ * PR-review tick — a one-shot scan for open PRs the review bot hasn't
  * reviewed yet, dispatching a review task to the reviewer agent for each.
  *
- * Design intent (per the feature request):
+ * Design intent:
  *   - The "does this PR need review?" decision is made PROGRAMMATICALLY against
  *     the GitHub REST API (list repos → list open PRs → check for the bot's
  *     own reviews/comments). No AI tokens are spent deciding.
  *   - The agent is woken ONLY when a PR actually needs review; it then performs
  *     the review (inline comments / approval) with its own GitHub access.
  *
- * Runs in-process on a timer (like self-upgrade), so all session-DB writes stay
- * in the host process — no second writer. Opt-in via PR_REVIEW_ENABLED.
- *
- * Host integration: src/index.ts calls startPrReview() at boot and
- * stopPrReview() on shutdown.
+ * Scheduling lives outside the host process: a system cron (or launchd /
+ * systemd timer) invokes `ncl pr-review run` on whatever cadence the
+ * operator chose. That command calls runPrReviewTick() inside the host so
+ * session-DB writes still come from the single host writer. Opt-in via
+ * PR_REVIEW_ENABLED.
  */
 import {
   PR_REVIEW_AGENT_GROUP_ID,
   PR_REVIEW_COOLDOWN_MS,
   PR_REVIEW_ENABLED,
-  PR_REVIEW_INTERVAL_MS,
   PR_REVIEW_STATUS_MESSAGING_GROUP_ID,
 } from '../../config.js';
 import { getGithubAppForAgentGroup } from '../../db/github-apps.js';
@@ -32,59 +31,56 @@ import { shouldDispatch } from './scan.js';
 
 const FETCH_TIMEOUT_MS = 10_000;
 
-let timer: NodeJS.Timeout | null = null;
-let inFlight = false;
 // The bot login (`<app-slug>[bot]`), resolved once via fetchAppLogin and cached
 // for the process lifetime. Stays null after a transient failure (bad JWT,
 // network blip), so the next tick retries — intentional: the login is required
-// to recognise the bot's own reviews, and one extra GET /app per minute until
+// to recognise the bot's own reviews, and one extra GET /app per tick until
 // GitHub recovers is far cheaper than a sentinel that would disable reviewing
 // until a host restart.
 let appLoginCache: string | null = null;
 
-export function startPrReview(): void {
+// Guard against a cron entry firing faster than a tick can complete (e.g. the
+// operator set `* * * * *` but a tick scanning many repos takes 90s). Without
+// it, two concurrent ticks would race on the dispatch table. Concurrent
+// invocations skip with a clear status; the caller (cron / ncl) sees it.
+let inFlight = false;
+
+export interface TickResult {
+  status: 'ran' | 'disabled' | 'misconfigured' | 'busy';
+  dispatched?: number;
+  reason?: string;
+}
+
+/**
+ * Run one PR-review scan inside the host process. Invoked by
+ * `ncl pr-review run` (typically from cron). Returns a summary the caller
+ * can render or log.
+ */
+export async function runPrReviewTick(): Promise<TickResult> {
   if (!PR_REVIEW_ENABLED) {
-    log.info('PR-review cron disabled (PR_REVIEW_ENABLED not set)');
-    return;
+    return { status: 'disabled', reason: 'PR_REVIEW_ENABLED is not set' };
   }
   if (!PR_REVIEW_AGENT_GROUP_ID) {
-    log.warn('PR-review cron enabled but PR_REVIEW_AGENT_GROUP_ID is unset — not starting');
-    return;
+    return { status: 'misconfigured', reason: 'PR_REVIEW_AGENT_GROUP_ID is not set' };
   }
-  if (timer) return;
-  log.info('PR-review cron enabled', {
-    agentGroupId: PR_REVIEW_AGENT_GROUP_ID,
-    intervalMs: PR_REVIEW_INTERVAL_MS,
-    cooldownMs: PR_REVIEW_COOLDOWN_MS,
-    statusMessagingGroupId: PR_REVIEW_STATUS_MESSAGING_GROUP_ID,
-  });
-  timer = setInterval(() => {
-    if (inFlight) {
-      log.debug('PR-review: previous tick still running — skipping');
-      return;
-    }
-    inFlight = true;
-    tick()
-      .catch((err) => log.error('PR-review tick threw', { err }))
-      .finally(() => {
-        inFlight = false;
-      });
-  }, PR_REVIEW_INTERVAL_MS);
+  if (inFlight) {
+    return { status: 'busy', reason: 'previous tick still running' };
+  }
+
+  inFlight = true;
+  try {
+    const dispatched = await scanAndDispatch(PR_REVIEW_AGENT_GROUP_ID);
+    return { status: 'ran', dispatched };
+  } finally {
+    inFlight = false;
+  }
 }
 
-export function stopPrReview(): void {
-  if (timer) clearInterval(timer);
-  timer = null;
-}
-
-async function tick(): Promise<void> {
-  const agentGroupId = PR_REVIEW_AGENT_GROUP_ID;
-  if (!agentGroupId) return;
-
+async function scanAndDispatch(agentGroupId: string): Promise<number> {
   const identity = getGithubAppForAgentGroup(agentGroupId);
   if (!identity) {
     log.warn('PR-review: reviewer agent group has no GitHub App identity — skipping', { agentGroupId });
-    return;
+    return 0;
   }
   const creds: GithubAppCredentials = {
     appId: identity.app_id,
@@ -95,17 +91,17 @@ async function tick(): Promise<void> {
   const apiUrl = identity.api_url || 'https://api.github.com';
 
   const token = await mintInstallationToken(creds, FETCH_TIMEOUT_MS);
-  if (!token) return; // mintInstallationToken logs the reason
+  if (!token) return 0; // mintInstallationToken logs the reason
 
   if (!appLoginCache) appLoginCache = await fetchAppLogin(creds, FETCH_TIMEOUT_MS);
   const botLogin = appLoginCache;
   if (!botLogin) {
     log.warn('PR-review: could not resolve the bot login — skipping tick');
-    return;
+    return 0;
   }
 
   const repos = await listInstallationRepos(token, apiUrl, FETCH_TIMEOUT_MS);
-  if (!repos) return;
+  if (!repos) return 0;
 
   const now = Date.now();
   let dispatched = 0;
@@ -163,4 +159,5 @@ async function tick(): Promise<void> {
     }
   }
   if (dispatched > 0) log.info('PR-review: tick dispatched reviews', { dispatched });
+  return dispatched;
 }
