@@ -72,6 +72,14 @@ configured messaging group in `shared` mode, so the bot's natural chat reply
 flows back to the same chat. Without the env var, the original silent
 `agent-shared` behaviour is preserved.
 
+**Best-effort.** The completion message relies on the agent following the
+chat-reply instruction in its prompt. If the agent run is interrupted (the
+container is killed mid-review, the GitHub token expires, an unhandled
+error trips it) you will see the "review requested" ping but no
+completion notice. The PR-review cooldown (`PR_REVIEW_COOLDOWN_MS`) still
+applies, so the same PR will be re-dispatched on the next scan after the
+cooldown elapses.
+
 ## Scope and behaviour
 
 - **Repos:** every repo the reviewer's GitHub App installation can access. Add
