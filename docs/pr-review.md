@@ -48,9 +48,29 @@ PR_REVIEW_AGENT_GROUP_ID=<reviewer agent group id>
 # optional:
 PR_REVIEW_INTERVAL_MS=60000     # scan cadence (floored at 15000)
 PR_REVIEW_COOLDOWN_MS=1800000   # re-dispatch window if no review lands (floored at 60000)
+PR_REVIEW_STATUS_MESSAGING_GROUP_ID=<id>  # see "Status updates" below
 ```
 
 Restart the host. With `PR_REVIEW_ENABLED` unset the job never starts.
+
+## Status updates (optional)
+
+By default the reviewer agent stays silent — it leaves inline comments on the
+PR and that's it. If you set `PR_REVIEW_STATUS_MESSAGING_GROUP_ID` to the id
+of a `messaging_group` (e.g. a Telegram group chat the review bot is in),
+each dispatch produces two updates in that chat:
+
+1. **Review requested** — posted by the host the instant a PR is handed off,
+   before the container even wakes (so you see the ping in real time):
+   `Review requested: acme/widgets#42 / Title: ... / Author: @octocat / <url>`.
+2. **Review complete** — the agent's own reply once it has submitted its
+   review, with the verdict (`APPROVED` / `CHANGES_REQUESTED` / `COMMENTED`),
+   the PR link, and a one-paragraph summary.
+
+To make (2) work, dispatch resolves the reviewer's session against the
+configured messaging group in `shared` mode, so the bot's natural chat reply
+flows back to the same chat. Without the env var, the original silent
+`agent-shared` behaviour is preserved.
 
 ## Scope and behaviour
 
