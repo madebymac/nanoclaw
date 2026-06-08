@@ -125,7 +125,7 @@ describe('dispatchReview', () => {
       platform_id: 'tg-group-123',
       name: 'agents',
       is_group: 1,
-      unknown_sender_policy: 'allow',
+      unknown_sender_policy: 'public',
       created_at: new Date().toISOString(),
     });
 

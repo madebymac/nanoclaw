@@ -25,7 +25,6 @@ const envConfig = readEnvFile(
     'TZ',
     'PR_REVIEW_ENABLED',
     'PR_REVIEW_AGENT_GROUP_ID',
-    'PR_REVIEW_INTERVAL_MS',
     'PR_REVIEW_COOLDOWN_MS',
     'PR_REVIEW_STATUS_MESSAGING_GROUP_ID',
   ],
@@ -70,22 +69,16 @@ export const SELF_UPGRADE_INTERVAL_MS = Math.max(
 );
 export const SELF_UPGRADE_REMOTE = process.env.NANOCLAW_SELF_UPGRADE_REMOTE || 'origin';
 
-// PR-review cron: a periodic, host-side job that scans open PRs across the
-// review bot's GitHub App installation and, for any the bot hasn't reviewed
-// yet, instructs the reviewer agent to review them. The "needs review?" check
-// is pure GitHub REST (no AI tokens); the agent is only woken when a PR
-// actually needs review. Opt-in — disabled unless PR_REVIEW_ENABLED=true and
-// PR_REVIEW_AGENT_GROUP_ID names the reviewer agent group (which must have a
-// github_app_identity). See src/modules/pr-review/.
+// PR-review: a host-side scan for open PRs the review bot hasn't reviewed yet,
+// invoked by `ncl pr-review run` (typically from system cron). The "needs
+// review?" check is pure GitHub REST (no AI tokens); the agent is only woken
+// when a PR actually needs review. Opt-in — `ncl pr-review run` short-circuits
+// unless PR_REVIEW_ENABLED=true and PR_REVIEW_AGENT_GROUP_ID names the
+// reviewer agent group (which must have a github_app_identity). See
+// src/modules/pr-review/ and docs/pr-review.md for the crontab recipe.
 export const PR_REVIEW_ENABLED = (process.env.PR_REVIEW_ENABLED || envConfig.PR_REVIEW_ENABLED) === 'true';
 export const PR_REVIEW_AGENT_GROUP_ID =
   process.env.PR_REVIEW_AGENT_GROUP_ID || envConfig.PR_REVIEW_AGENT_GROUP_ID || null;
-// Scan cadence. Cheap (a few REST calls), so a short interval is fine; floored
-// to avoid hammering the API if misconfigured.
-export const PR_REVIEW_INTERVAL_MS = Math.max(
-  15_000,
-  parseInt(process.env.PR_REVIEW_INTERVAL_MS || envConfig.PR_REVIEW_INTERVAL_MS || '60000', 10) || 60_000,
-);
 // How long after dispatching a PR before it may be re-dispatched if the bot's
 // review still hasn't landed (covers an agent run that errored out).
 export const PR_REVIEW_COOLDOWN_MS = Math.max(
