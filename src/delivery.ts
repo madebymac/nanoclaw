@@ -517,9 +517,7 @@ async function deliverMessage(
   // already succeeded, so swallow and log.
   if (msg.kind === 'chat' && agentToAgentInstalled()) {
     try {
-      const { bridgeGroupMessageToCoResidentAgents } = await import(
-        './modules/agent-to-agent/group-bridge.js'
-      );
+      const { bridgeGroupMessageToCoResidentAgents } = await import('./modules/agent-to-agent/group-bridge.js');
       await bridgeGroupMessageToCoResidentAgents(msg, session);
     } catch (err) {
       log.warn('Shared-group bridge failed (message already delivered to platform)', { id: msg.id, err });

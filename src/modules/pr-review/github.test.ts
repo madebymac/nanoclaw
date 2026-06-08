@@ -7,7 +7,12 @@ const TOKEN = 'ghs_test';
 const TIMEOUT = 5_000;
 
 function jsonResponse(body: unknown): Response {
-  return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) } as unknown as Response;
+  return {
+    ok: true,
+    status: 200,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  } as unknown as Response;
 }
 
 function route(map: Record<string, unknown>): void {
@@ -90,7 +95,10 @@ describe('botHasTouchedPull', () => {
   it('returns null when an endpoint errors (so the caller skips rather than mis-dispatches)', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({ ok: false, status: 500, text: async () => 'boom', json: async () => ({}) }) as unknown as Response),
+      vi.fn(
+        async () =>
+          ({ ok: false, status: 500, text: async () => 'boom', json: async () => ({}) }) as unknown as Response,
+      ),
     );
     expect(await botHasTouchedPull(TOKEN, API, 'acme', 'widgets', 5, 'reviewbot[bot]', TIMEOUT)).toBeNull();
   });

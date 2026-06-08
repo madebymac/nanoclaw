@@ -94,7 +94,11 @@ export async function listInstallationRepos(
   return items
     .map((r) => r as { name?: string; owner?: { login?: string }; full_name?: string })
     .filter((r) => r.owner?.login && r.name)
-    .map((r) => ({ owner: r.owner!.login as string, repo: r.name as string, fullName: r.full_name ?? `${r.owner!.login}/${r.name}` }));
+    .map((r) => ({
+      owner: r.owner!.login as string,
+      repo: r.name as string,
+      fullName: r.full_name ?? `${r.owner!.login}/${r.name}`,
+    }));
 }
 
 export async function listOpenPulls(

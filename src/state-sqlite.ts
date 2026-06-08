@@ -96,7 +96,9 @@ export class SqliteStateAdapter implements StateAdapter {
   }
 
   async isSubscribed(threadId: string): Promise<boolean> {
-    const row = this.db.prepare('SELECT 1 FROM chat_sdk_subscriptions WHERE thread_id = ? LIMIT 1').get(this.k(threadId));
+    const row = this.db
+      .prepare('SELECT 1 FROM chat_sdk_subscriptions WHERE thread_id = ? LIMIT 1')
+      .get(this.k(threadId));
     return !!row;
   }
 
@@ -116,7 +118,9 @@ export class SqliteStateAdapter implements StateAdapter {
   }
 
   async releaseLock(lock: Lock): Promise<void> {
-    this.db.prepare('DELETE FROM chat_sdk_locks WHERE thread_id = ? AND token = ?').run(this.k(lock.threadId), lock.token);
+    this.db
+      .prepare('DELETE FROM chat_sdk_locks WHERE thread_id = ? AND token = ?')
+      .run(this.k(lock.threadId), lock.token);
   }
 
   async extendLock(lock: Lock, ttlMs: number): Promise<boolean> {

@@ -41,11 +41,16 @@ describe('fixProxyGatewayPort', () => {
 
   it('rewrites all four proxy key casings in a single pass', () => {
     const args = [
-      '-e', 'HTTPS_PROXY=http://x:tok@host.docker.internal:10255',
-      '--name', 'something',
-      '-e', 'HTTP_PROXY=http://x:tok@host.docker.internal:10255',
-      '-e', 'https_proxy=http://x:tok@host.docker.internal:10255',
-      '-e', 'http_proxy=http://x:tok@host.docker.internal:10255',
+      '-e',
+      'HTTPS_PROXY=http://x:tok@host.docker.internal:10255',
+      '--name',
+      'something',
+      '-e',
+      'HTTP_PROXY=http://x:tok@host.docker.internal:10255',
+      '-e',
+      'https_proxy=http://x:tok@host.docker.internal:10255',
+      '-e',
+      'http_proxy=http://x:tok@host.docker.internal:10255',
     ];
     fixProxyGatewayPort(args, 'http://172.17.0.1:10354');
     expect(args[1]).toBe('HTTPS_PROXY=http://x:tok@host.docker.internal:10355');
@@ -69,10 +74,7 @@ describe('fixProxyGatewayPort', () => {
   });
 
   it('ignores -e args whose key is not a recognized proxy env var', () => {
-    const args = [
-      '-e', 'FOO_PROXY=http://x:tok@host.docker.internal:10255',
-      '-e', 'NOT_A_PROXY=:10255',
-    ];
+    const args = ['-e', 'FOO_PROXY=http://x:tok@host.docker.internal:10255', '-e', 'NOT_A_PROXY=:10255'];
     fixProxyGatewayPort(args, 'http://172.17.0.1:10354');
     expect(args[1]).toBe('FOO_PROXY=http://x:tok@host.docker.internal:10255');
     expect(args[3]).toBe('NOT_A_PROXY=:10255');

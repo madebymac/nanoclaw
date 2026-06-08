@@ -13,19 +13,40 @@ function dispatch(over: Partial<PrReviewDispatch> = {}): PrReviewDispatch {
 describe('shouldDispatch', () => {
   it('dispatches a fresh, non-draft, un-touched PR with no history', () => {
     expect(
-      shouldDispatch({ isDraft: false, alreadyTouched: false, headSha: 'sha-1', dispatch: undefined, nowMs: NOW, cooldownMs: COOLDOWN }),
+      shouldDispatch({
+        isDraft: false,
+        alreadyTouched: false,
+        headSha: 'sha-1',
+        dispatch: undefined,
+        nowMs: NOW,
+        cooldownMs: COOLDOWN,
+      }),
     ).toBe(true);
   });
 
   it('never dispatches drafts', () => {
     expect(
-      shouldDispatch({ isDraft: true, alreadyTouched: false, headSha: 'sha-1', dispatch: undefined, nowMs: NOW, cooldownMs: COOLDOWN }),
+      shouldDispatch({
+        isDraft: true,
+        alreadyTouched: false,
+        headSha: 'sha-1',
+        dispatch: undefined,
+        nowMs: NOW,
+        cooldownMs: COOLDOWN,
+      }),
     ).toBe(false);
   });
 
   it('never dispatches a PR the bot has already touched', () => {
     expect(
-      shouldDispatch({ isDraft: false, alreadyTouched: true, headSha: 'sha-1', dispatch: undefined, nowMs: NOW, cooldownMs: COOLDOWN }),
+      shouldDispatch({
+        isDraft: false,
+        alreadyTouched: true,
+        headSha: 'sha-1',
+        dispatch: undefined,
+        nowMs: NOW,
+        cooldownMs: COOLDOWN,
+      }),
     ).toBe(false);
   });
 

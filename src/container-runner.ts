@@ -119,7 +119,10 @@ function dockerExecWrite(containerName: string, shellCmd: string, input: string,
       child.kill();
       reject(new Error(`docker exec timed out after ${timeoutMs}ms`));
     }, timeoutMs);
-    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code === 0) resolve();
@@ -164,12 +167,7 @@ async function refreshGithubTokenInContainer(
       return;
     }
 
-    await dockerExecWrite(
-      entry.containerName,
-      'cat > /tmp/.gh-token && chmod 600 /tmp/.gh-token',
-      token,
-      5_000,
-    );
+    await dockerExecWrite(entry.containerName, 'cat > /tmp/.gh-token && chmod 600 /tmp/.gh-token', token, 5_000);
     entry.tokenMintedAt = Date.now();
     log.info('GitHub App token refreshed in container', { agentGroupId, containerName: entry.containerName });
   } catch (err) {

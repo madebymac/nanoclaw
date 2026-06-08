@@ -38,7 +38,9 @@ function now(): string {
 function readInbound(agentGroupId: string, sessionId: string) {
   const db = new Database(inboundDbPath(agentGroupId, sessionId), { readonly: true });
   const rows = db
-    .prepare('SELECT platform_id, channel_type, content, trigger AS trig, source_session_id FROM messages_in ORDER BY seq')
+    .prepare(
+      'SELECT platform_id, channel_type, content, trigger AS trig, source_session_id FROM messages_in ORDER BY seq',
+    )
     .all() as Array<{
     platform_id: string | null;
     channel_type: string | null;
@@ -117,7 +119,13 @@ describe('bridgeGroupMessageToCoResidentAgents', () => {
     createMessagingGroupAgent(wiring('w-rev', 'mg-rev', REVIEW, reviewPattern, reviewPolicy));
 
     // review knows general by the local name "general"
-    createDestination({ agent_group_id: REVIEW, local_name: 'general', target_type: 'agent', target_id: GENERAL, created_at: now() });
+    createDestination({
+      agent_group_id: REVIEW,
+      local_name: 'general',
+      target_type: 'agent',
+      target_id: GENERAL,
+      created_at: now(),
+    });
 
     genSess = session('sess-gen', GENERAL, 'mg-gen');
     revSess = session('sess-rev', REVIEW, 'mg-rev');
@@ -166,7 +174,7 @@ describe('bridgeGroupMessageToCoResidentAgents', () => {
     expect(wakeContainer).toHaveBeenCalledTimes(1);
   });
 
-  it('does not bridge or wake when the peer\'s pattern does not match and policy is drop', async () => {
+  it("does not bridge or wake when the peer's pattern does not match and policy is drop", async () => {
     setup('@review|@[Aa]ll', 'drop');
     await bridgeGroupMessageToCoResidentAgents(
       {
