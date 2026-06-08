@@ -94,8 +94,23 @@ export async function dispatchReview(
     );
   }
 
-  const { session } = statusMg
-    ? resolveSession(agentGroupId, statusMg.id, null, 'shared')
+  // Resolve the adapter up-front: if it's missing, the agent's completion
+  // reply would be written to a session bound to an unreachable chat and
+  // silently dropped. Treat that the same as a missing messaging group and
+  // fall all the way back to silent agent-shared dispatch.
+  const adapter = statusMg ? getChannelAdapter(statusMg.channel_type) : undefined;
+  if (statusMg && !adapter) {
+    log.warn(
+      'pr-review: no live channel adapter for status messaging group — falling back to agent-shared silent dispatch',
+      {
+        channelType: statusMg.channel_type,
+      },
+    );
+  }
+  const effectiveStatusMg = statusMg && adapter ? statusMg : undefined;
+
+  const { session } = effectiveStatusMg
+    ? resolveSession(agentGroupId, effectiveStatusMg.id, null, 'shared')
     : resolveSession(agentGroupId, null, null, 'agent-shared');
 
   const id = `prr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -106,7 +121,7 @@ export async function dispatchReview(
     platformId: null,
     channelType: null,
     threadId: null,
-    content: JSON.stringify({ prompt: buildPrompt(pr, Boolean(statusMg)), source: 'pr-review-cron' }),
+    content: JSON.stringify({ prompt: buildPrompt(pr, Boolean(effectiveStatusMg)), source: 'pr-review-cron' }),
     trigger: 1,
   });
 
@@ -116,24 +131,17 @@ export async function dispatchReview(
     repo: pr.fullName,
     pr: pr.number,
     taskId: id,
-    statusMessagingGroupId: statusMg?.id ?? null,
+    statusMessagingGroupId: effectiveStatusMg?.id ?? null,
   });
 
-  if (statusMg) {
-    const adapter = getChannelAdapter(statusMg.channel_type);
-    if (!adapter) {
-      log.warn('pr-review: no live channel adapter for status messaging group — skipping requested-status post', {
-        channelType: statusMg.channel_type,
+  if (effectiveStatusMg) {
+    try {
+      await adapter!.deliver(effectiveStatusMg.platform_id, null, {
+        kind: 'chat',
+        content: { text: buildRequestedStatus(pr) },
       });
-    } else {
-      try {
-        await adapter.deliver(statusMg.platform_id, null, {
-          kind: 'chat',
-          content: { text: buildRequestedStatus(pr) },
-        });
-      } catch (err) {
-        log.error('pr-review: failed to post requested-status', { err, repo: pr.fullName, pr: pr.number });
-      }
+    } catch (err) {
+      log.error('pr-review: failed to post requested-status', { err, repo: pr.fullName, pr: pr.number });
     }
   }
 
