@@ -20,6 +20,7 @@ import {
   PR_REVIEW_COOLDOWN_MS,
   PR_REVIEW_ENABLED,
   PR_REVIEW_INTERVAL_MS,
+  PR_REVIEW_STATUS_MESSAGING_GROUP_ID,
 } from '../../config.js';
 import { getGithubAppForAgentGroup } from '../../db/github-apps.js';
 import { fetchAppLogin, mintInstallationToken, type GithubAppCredentials } from '../../github-app-broker.js';
@@ -55,6 +56,7 @@ export function startPrReview(): void {
     agentGroupId: PR_REVIEW_AGENT_GROUP_ID,
     intervalMs: PR_REVIEW_INTERVAL_MS,
     cooldownMs: PR_REVIEW_COOLDOWN_MS,
+    statusMessagingGroupId: PR_REVIEW_STATUS_MESSAGING_GROUP_ID,
   });
   timer = setInterval(() => {
     if (inFlight) {
@@ -142,13 +144,17 @@ async function tick(): Promise<void> {
       }
 
       try {
-        await dispatchReview(agentGroupId, {
-          fullName: r.fullName,
-          number: pr.number,
-          title: pr.title,
-          author: pr.author,
-          htmlUrl: pr.htmlUrl,
-        });
+        await dispatchReview(
+          agentGroupId,
+          {
+            fullName: r.fullName,
+            number: pr.number,
+            title: pr.title,
+            author: pr.author,
+            htmlUrl: pr.htmlUrl,
+          },
+          PR_REVIEW_STATUS_MESSAGING_GROUP_ID,
+        );
         recordDispatch(r.fullName, pr.number, pr.headSha, new Date().toISOString());
         dispatched++;
       } catch (err) {
