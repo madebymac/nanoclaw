@@ -64,6 +64,7 @@ import './modules/index.js';
 import './cli/commands/index.js';
 import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
+import { rehydrateOneCLICredentials } from './container-runner.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
@@ -169,6 +170,13 @@ async function main(): Promise<void> {
     },
   };
   setDeliveryAdapter(deliveryAdapter);
+
+  // 4b. Re-register all agent groups with OneCLI so credential injection
+  // survives service restarts (issue #29). Best-effort — failure is logged
+  // but never blocks startup.
+  rehydrateOneCLICredentials().catch((err) => {
+    log.warn('OneCLI credential rehydration failed at startup', { err });
+  });
 
   // 5. Start delivery polls
   startActiveDeliveryPoll();
