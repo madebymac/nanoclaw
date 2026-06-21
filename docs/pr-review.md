@@ -48,17 +48,7 @@ The flip-side: the cadence now lives in your crontab, not in env vars. No
    (`ncl github-apps create --agent-group-id <id> ...`), since that's both how
    the host mints a token to scan and how the agent authenticates to review.
 
-2. In `.env` (or the environment):
-   ```bash
-   PR_REVIEW_ENABLED=true
-   PR_REVIEW_AGENT_GROUP_ID=<reviewer agent group id>
-   # optional:
-   PR_REVIEW_COOLDOWN_MS=1800000               # re-dispatch window if no review lands (floored at 60000)
-   PR_REVIEW_STATUS_MESSAGING_GROUP_ID=<id>    # see "Status updates" below
-   ```
-   Restart the host so it picks up the new env vars.
-
-3. Add a system cron entry, e.g. every minute:
+2. Add a system cron entry, e.g. every minute:
    ```cron
    * * * * * /path/to/nanoclaw/ncl pr-review run >/dev/null 2>&1
    ```
@@ -67,15 +57,17 @@ The flip-side: the cadence now lives in your crontab, not in env vars. No
    the running host over `data/ncl.sock`, so the host must be running for
    ticks to do anything (a tick fired with the host down logs and exits non-zero).
 
-With `PR_REVIEW_ENABLED=false` or unset, `ncl pr-review run` returns
-`{status: "disabled"}` and does no work — safe to leave the cron entry in
-place across enable/disable cycles.
+That's it — no `.env` changes required. The reviewer agent group is
+auto-discovered from whichever group has a GitHub App identity bound to it.
 
-You can also run a tick by hand for diagnosis:
+You can verify it's working by running a tick by hand:
 ```bash
 ncl pr-review run
 # → {"status":"ran","dispatched":2}
 ```
+
+If you have multiple GitHub Apps configured and need to target a specific one,
+set `PR_REVIEW_AGENT_GROUP_ID=<reviewer agent group id>` in `.env`.
 
 ## Status updates (optional)
 
