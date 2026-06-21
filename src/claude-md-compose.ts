@@ -14,6 +14,7 @@
  *
  * See `docs/claude-md-composition.md` for the full design.
  */
+import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -39,15 +40,15 @@ const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.loc
  * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
  * fragments, and MCP server fragments declared in `container.json`. Creates
  * an empty `CLAUDE.local.md` if missing.
+ *
+ * Hash-gated: if the desired fragment set and body are identical to the last
+ * run, the filesystem writes are skipped entirely (saves ~100-300ms per spawn).
  */
 export function composeGroupClaudeMd(group: AgentGroup): void {
   const groupDir = path.resolve(GROUPS_DIR, group.folder);
   if (!fs.existsSync(groupDir)) {
     fs.mkdirSync(groupDir, { recursive: true });
   }
-
-  const sharedLink = path.join(groupDir, '.claude-shared.md');
-  syncSymlink(sharedLink, SHARED_CLAUDE_MD_CONTAINER_PATH);
 
   const fragmentsDir = path.join(groupDir, '.claude-fragments');
   if (!fs.existsSync(fragmentsDir)) {
@@ -106,6 +107,31 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
+  // Composed entry — imports only.
+  const imports = ['@./.claude-shared.md'];
+  for (const name of [...desired.keys()].sort()) {
+    imports.push(`@./.claude-fragments/${name}`);
+  }
+  const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
+
+  // Hash-gate: skip all filesystem work when nothing has changed.
+  // Hash encodes: body (fragment names) + inline fragment contents (symlink
+  // targets are live — their content changes don't affect the symlink path).
+  const hashFile = path.join(groupDir, '.compose-hash');
+  const currentHash = computeComposeHash(desired, body);
+  try {
+    if (fs.readFileSync(hashFile, 'utf8').trim() === currentHash) {
+      const localFile = path.join(groupDir, 'CLAUDE.local.md');
+      if (!fs.existsSync(localFile)) fs.writeFileSync(localFile, '');
+      return;
+    }
+  } catch {
+    /* hash file missing or unreadable — proceed with full compose */
+  }
+
+  const sharedLink = path.join(groupDir, '.claude-shared.md');
+  syncSymlink(sharedLink, SHARED_CLAUDE_MD_CONTAINER_PATH);
+
   // Reconcile: drop stale, write desired.
   for (const existing of fs.readdirSync(fragmentsDir)) {
     if (!desired.has(existing)) {
@@ -121,18 +147,30 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
-  // Composed entry — imports only.
-  const imports = ['@./.claude-shared.md'];
-  for (const name of [...desired.keys()].sort()) {
-    imports.push(`@./.claude-fragments/${name}`);
-  }
-  const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
   writeAtomic(path.join(groupDir, 'CLAUDE.md'), body);
 
   const localFile = path.join(groupDir, 'CLAUDE.local.md');
   if (!fs.existsSync(localFile)) {
     fs.writeFileSync(localFile, '');
   }
+
+  // Persist hash so the next spawn can skip this work.
+  fs.writeFileSync(hashFile, currentHash + '\n');
+
+  log.debug('Composed CLAUDE.md', { group: group.name, fragments: desired.size });
+}
+
+function computeComposeHash(
+  desired: Map<string, { type: 'symlink' | 'inline'; content: string }>,
+  body: string,
+): string {
+  const h = createHash('sha256');
+  h.update(body);
+  // Include inline fragment content (symlink targets are live paths — no need to hash their content).
+  for (const [name, frag] of [...desired.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (frag.type === 'inline') h.update(`${name}:${frag.content}\n`);
+  }
+  return h.digest('hex').slice(0, 16);
 }
 
 /**
