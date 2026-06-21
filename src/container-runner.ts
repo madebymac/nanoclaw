@@ -711,9 +711,13 @@ async function buildContainerArgs(
   // behaviour (the documented gotcha) rather than blocking the spawn.
   if (agentIdentifier) {
     await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
-    await ensureAgentSecretModeAll(agentIdentifier);
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+  // ensureAgentSecretModeAll is best-effort (never throws); run in parallel with
+  // applyContainerConfig to save ~500ms per cold spawn.
+  const [, onecliApplied] = await Promise.all([
+    agentIdentifier ? ensureAgentSecretModeAll(agentIdentifier) : Promise.resolve(),
+    onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier }),
+  ]);
   if (!onecliApplied) {
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
