@@ -4,6 +4,7 @@
  * The container runs the v2 agent-runner which polls the session DB.
  */
 import { ChildProcess, execSync, spawn } from 'child_process';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -609,6 +610,9 @@ function buildMounts(
  * Sync skill symlinks in .claude-shared/skills/ to match the container.json
  * selection. Each symlink points to a container path (/app/skills/<name>)
  * so it's dangling on the host but valid inside the container.
+ *
+ * Hash-gated: skips reconciliation when the desired skill set is unchanged
+ * since the last spawn.
  */
 function syncSkillSymlinks(claudeDir: string, containerConfig: import('./container-config.js').ContainerConfig): void {
   const skillsDir = path.join(claudeDir, 'skills');
@@ -635,10 +639,20 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
     desired = containerConfig.skills;
   }
 
+  // Hash-gate: skip reconciliation when skill set is unchanged.
+  const skillsHash = createHash('sha256').update([...desired].sort().join('\n')).digest('hex').slice(0, 16);
+  const hashFile = path.join(skillsDir, '.skills-hash');
+  try {
+    if (fs.readFileSync(hashFile, 'utf8').trim() === skillsHash) return;
+  } catch {
+    /* hash file missing or unreadable — proceed with full sync */
+  }
+
   const desiredSet = new Set(desired);
 
   // Remove symlinks not in the desired set
   for (const entry of fs.readdirSync(skillsDir)) {
+    if (entry === '.skills-hash') continue;
     const entryPath = path.join(skillsDir, entry);
     let isSymlink = false;
     try {
@@ -665,6 +679,9 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
       fs.symlinkSync(`/app/skills/${skill}`, linkPath);
     }
   }
+
+  // Persist hash so the next spawn can skip this work.
+  fs.writeFileSync(hashFile, skillsHash + '\n');
 }
 
 async function buildContainerArgs(
