@@ -1,8 +1,8 @@
 /**
- * Smoke tests for runPrReviewTick's opt-in gates. The full
+ * Smoke tests for runPrReviewTick's short-circuit gates. The full
  * scan-and-dispatch path is covered by github.test.ts + scan.test.ts +
  * dispatch.test.ts; here we just verify the short-circuits the cron
- * caller relies on (disabled / misconfigured) return a recognisable
+ * caller relies on (misconfigured / busy) return a recognisable
  * status without hitting GitHub.
  */
 import { describe, expect, it, vi } from 'vitest';
@@ -11,17 +11,21 @@ vi.mock('../../config.js', async () => {
   const actual = await vi.importActual<typeof import('../../config.js')>('../../config.js');
   return {
     ...actual,
-    PR_REVIEW_ENABLED: false,
     PR_REVIEW_AGENT_GROUP_ID: null,
   };
 });
 
+vi.mock('../../db/github-apps.js', () => ({
+  getAllGithubAppIdentities: () => [],
+  getGithubAppForAgentGroup: () => undefined,
+}));
+
 import { runPrReviewTick } from './index.js';
 
 describe('runPrReviewTick gates', () => {
-  it('returns disabled when PR_REVIEW_ENABLED is false', async () => {
+  it('returns misconfigured when no GitHub App identity is bound', async () => {
     const result = await runPrReviewTick();
-    expect(result.status).toBe('disabled');
-    expect(result.reason).toMatch(/PR_REVIEW_ENABLED/);
+    expect(result.status).toBe('misconfigured');
+    expect(result.reason).toMatch(/GitHub App identity/);
   });
 });
