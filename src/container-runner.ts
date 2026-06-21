@@ -24,7 +24,7 @@ import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
-import { getAgentGroup } from './db/agent-groups.js';
+import { getAgentGroup, getAllAgentGroups } from './db/agent-groups.js';
 import { getGithubAppForAgentGroup } from './db/github-apps.js';
 import { mintInstallationToken } from './github-app-broker.js';
 import { getDb, hasTable } from './db/connection.js';
@@ -820,4 +820,39 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   updateContainerConfigScalars(agentGroup.id, { image_tag: imageTag });
 
   log.info('Per-agent-group image built', { agentGroupId, imageTag });
+}
+
+/**
+ * Re-register all agent groups with the OneCLI proxy after a service restart.
+ *
+ * Issue #29: after `make deploy` / `systemctl restart`, OneCLI drops its
+ * in-memory credential mappings, causing GitHub API calls to fall back to
+ * the unauthenticated rate limit (60 req/hr) and authenticated writes to 401.
+ *
+ * Fix: on startup, call `ensureAgent` + `ensureAgentSecretModeAll` for every
+ * agent group so OneCLI re-learns the mapping before any containers spawn.
+ * Best-effort — a transient OneCLI hiccup at startup must not block boot.
+ */
+export async function rehydrateOneCLICredentials(): Promise<void> {
+  const groups = getAllAgentGroups();
+  if (groups.length === 0) return;
+
+  log.info('Rehydrating OneCLI credentials after restart', { groups: groups.length });
+  let ok = 0;
+  let failed = 0;
+
+  await Promise.all(
+    groups.map(async (group) => {
+      try {
+        await onecli.ensureAgent({ name: group.name, identifier: group.id });
+        await ensureAgentSecretModeAll(group.id);
+        ok++;
+      } catch (err) {
+        log.warn('rehydrateOneCLICredentials: failed for group', { group: group.name, err: String(err) });
+        failed++;
+      }
+    }),
+  );
+
+  log.info('OneCLI credential rehydration complete', { ok, failed });
 }
