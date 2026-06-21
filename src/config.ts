@@ -23,7 +23,6 @@ const envConfig = readEnvFile(
     'ONECLI_URL',
     'ONECLI_API_KEY',
     'TZ',
-    'PR_REVIEW_ENABLED',
     'PR_REVIEW_AGENT_GROUP_ID',
     'PR_REVIEW_COOLDOWN_MS',
     'PR_REVIEW_STATUS_MESSAGING_GROUP_ID',
@@ -72,11 +71,10 @@ export const SELF_UPGRADE_REMOTE = process.env.NANOCLAW_SELF_UPGRADE_REMOTE || '
 // PR-review: a host-side scan for open PRs the review bot hasn't reviewed yet,
 // invoked by `ncl pr-review run` (typically from system cron). The "needs
 // review?" check is pure GitHub REST (no AI tokens); the agent is only woken
-// when a PR actually needs review. Opt-in — `ncl pr-review run` short-circuits
-// unless PR_REVIEW_ENABLED=true and PR_REVIEW_AGENT_GROUP_ID names the
-// reviewer agent group (which must have a github_app_identity). See
-// src/modules/pr-review/ and docs/pr-review.md for the crontab recipe.
-export const PR_REVIEW_ENABLED = (process.env.PR_REVIEW_ENABLED || envConfig.PR_REVIEW_ENABLED) === 'true';
+// when a PR actually needs review. No env vars required — the reviewer agent
+// group is auto-discovered from whichever group has a GitHub App identity.
+// Set PR_REVIEW_AGENT_GROUP_ID to override when multiple apps are configured.
+// See src/modules/pr-review/ and docs/pr-review.md for the crontab recipe.
 export const PR_REVIEW_AGENT_GROUP_ID =
   process.env.PR_REVIEW_AGENT_GROUP_ID || envConfig.PR_REVIEW_AGENT_GROUP_ID || null;
 // How long after dispatching a PR before it may be re-dispatched if the bot's
