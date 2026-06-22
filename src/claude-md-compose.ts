@@ -14,6 +14,7 @@
  *
  * See `docs/claude-md-composition.md` for the full design.
  */
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -35,10 +36,17 @@ const MCP_TOOLS_HOST_SUBPATH = path.join('container', 'agent-runner', 'src', 'mc
 
 const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.local.md for per-group content. -->';
 
+/** Marker file that holds the hash of the last successfully composed CLAUDE.md body. */
+const COMPOSE_HASH_FILE = '.claude-compose-hash';
+
 /**
  * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
  * fragments, and MCP server fragments declared in `container.json`. Creates
  * an empty `CLAUDE.local.md` if missing.
+ *
+ * Skips all filesystem work when the composed output would be identical to the
+ * last write — detected via a SHA-256 hash stored in `.claude-compose-hash`.
+ * This saves hundreds of ms per spawn on the Pi when nothing has changed (#9).
  */
 export function composeGroupClaudeMd(group: AgentGroup): void {
   const groupDir = path.resolve(GROUPS_DIR, group.folder);
@@ -46,13 +54,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     fs.mkdirSync(groupDir, { recursive: true });
   }
 
-  const sharedLink = path.join(groupDir, '.claude-shared.md');
-  syncSymlink(sharedLink, SHARED_CLAUDE_MD_CONTAINER_PATH);
-
   const fragmentsDir = path.join(groupDir, '.claude-fragments');
-  if (!fs.existsSync(fragmentsDir)) {
-    fs.mkdirSync(fragmentsDir, { recursive: true });
-  }
 
   // Desired fragment set.
   const configRow = getContainerConfig(group.id);
@@ -106,6 +108,34 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
+  // Composed entry — imports only.
+  const imports = ['@./.claude-shared.md'];
+  for (const name of [...desired.keys()].sort()) {
+    imports.push(`@./.claude-fragments/${name}`);
+  }
+  const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
+
+  // Skip all filesystem work when the composed body matches the stored hash.
+  const bodyHash = crypto.createHash('sha256').update(body).digest('hex');
+  const hashFile = path.join(groupDir, COMPOSE_HASH_FILE);
+  try {
+    if (fs.readFileSync(hashFile, 'utf-8').trim() === bodyHash) {
+      // Ensure CLAUDE.local.md exists even on the fast path.
+      const localFile = path.join(groupDir, 'CLAUDE.local.md');
+      if (!fs.existsSync(localFile)) fs.writeFileSync(localFile, '');
+      return;
+    }
+  } catch {
+    /* hash file missing or unreadable — fall through to full compose */
+  }
+
+  const sharedLink = path.join(groupDir, '.claude-shared.md');
+  syncSymlink(sharedLink, SHARED_CLAUDE_MD_CONTAINER_PATH);
+
+  if (!fs.existsSync(fragmentsDir)) {
+    fs.mkdirSync(fragmentsDir, { recursive: true });
+  }
+
   // Reconcile: drop stale, write desired.
   for (const existing of fs.readdirSync(fragmentsDir)) {
     if (!desired.has(existing)) {
@@ -121,18 +151,15 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
-  // Composed entry — imports only.
-  const imports = ['@./.claude-shared.md'];
-  for (const name of [...desired.keys()].sort()) {
-    imports.push(`@./.claude-fragments/${name}`);
-  }
-  const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
   writeAtomic(path.join(groupDir, 'CLAUDE.md'), body);
+  writeAtomic(hashFile, bodyHash + '\n');
 
   const localFile = path.join(groupDir, 'CLAUDE.local.md');
   if (!fs.existsSync(localFile)) {
     fs.writeFileSync(localFile, '');
   }
+
+  log.debug('CLAUDE.md recomposed', { group: group.name, fragments: desired.size });
 }
 
 /**
