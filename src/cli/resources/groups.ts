@@ -8,7 +8,8 @@ import {
   updateContainerConfigScalars,
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
-import type { ContainerConfigRow } from '../../types.js';
+import { initGroupFilesystem } from '../../group-init.js';
+import type { AgentGroup, ContainerConfigRow } from '../../types.js';
 import { registerResource } from '../crud.js';
 
 /** Deserialize JSON columns for display. */
@@ -58,6 +59,9 @@ registerResource({
     { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
   ],
   operations: { list: 'open', get: 'open', create: 'approval', update: 'approval', delete: 'approval' },
+  afterCreate: (row) => {
+    initGroupFilesystem(row as unknown as AgentGroup);
+  },
   customOperations: {
     restart: {
       access: 'approval',
