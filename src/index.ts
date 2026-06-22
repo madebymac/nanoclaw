@@ -15,6 +15,8 @@ import { runMigrations } from './db/migrations/index.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
+import { getRunningSessions } from './db/sessions.js';
+import { wakeContainer } from './container-runner.js';
 import { routeInbound } from './router.js';
 import { startSelfUpgrade, stopSelfUpgrade } from './self-upgrade.js';
 import { log, installConsoleCapture } from './log.js';
@@ -184,6 +186,24 @@ async function main(): Promise<void> {
 
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
+
+  // 7b. Pre-warm containers for sessions that were running/idle before this
+  // restart. The host process exit kills all containers, so the DB still
+  // records them as running/idle even though they're gone. Waking them now
+  // means the first post-restart message hits a warm container instead of
+  // paying the full cold-start cost. Fire-and-forget — a failure here doesn't
+  // block startup; the container will be woken on first message as usual.
+  const preWarmSessions = getRunningSessions();
+  if (preWarmSessions.length > 0) {
+    log.info('Pre-warming containers for sessions active before restart', {
+      count: preWarmSessions.length,
+    });
+    for (const session of preWarmSessions) {
+      wakeContainer(session).catch((err) => {
+        log.warn('Pre-warm failed for session', { sessionId: session.id, err });
+      });
+    }
+  }
 
   log.info('NanoClaw running');
 }
