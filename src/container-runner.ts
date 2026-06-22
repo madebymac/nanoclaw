@@ -67,8 +67,8 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
  */
 // GitHub App installation tokens expire after ~1h. Refresh when within 5m of
 // expiry so long-lived sessions don't silently lose GitHub access. See #66.
-const GH_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
-const GH_TOKEN_REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
+export const GH_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
+export const GH_TOKEN_REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
 
 /**
  * If the agent group has a bound GitHub App identity, mint a short-lived
@@ -175,6 +175,21 @@ async function refreshGithubTokenInContainer(
   } finally {
     refreshingContainers.delete(entry.containerName);
   }
+}
+
+/**
+ * Public entry point for the host-sweep to proactively refresh the GitHub App
+ * token for a running container, independent of message arrival.
+ *
+ * Called every sweep tick for every alive container so long-running sessions
+ * (no new messages for >55 min) don't silently lose GitHub access. No-ops
+ * when no identity is bound, when the token was minted recently, or when a
+ * refresh is already in-flight. See #66.
+ */
+export function maybeRefreshGithubToken(agentGroupId: string, sessionId: string): void {
+  const entry = activeContainers.get(sessionId);
+  if (!entry) return;
+  void refreshGithubTokenInContainer(agentGroupId, entry);
 }
 
 async function ensureAgentSecretModeAll(identifier: string): Promise<void> {
