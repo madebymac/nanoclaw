@@ -724,11 +724,21 @@ async function buildContainerArgs(
   // credential-availability optimization, not a wiring prerequisite, so a
   // OneCLI hiccup here degrades the agent to its old selective-mode
   // behaviour (the documented gotcha) rather than blocking the spawn.
-  if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
-    await ensureAgentSecretModeAll(agentIdentifier);
-  }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+  //
+  // ensureAgent + ensureAgentSecretModeAll run concurrently with
+  // applyContainerConfig: applyContainerConfig only needs the agent identifier
+  // string (not for the agent to be registered first), so both OneCLI HTTP
+  // roundtrips can be in-flight simultaneously — saving ~500 ms per cold
+  // spawn. See #8.
+  const [, onecliApplied] = await Promise.all([
+    agentIdentifier
+      ? (async () => {
+          await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+          await ensureAgentSecretModeAll(agentIdentifier);
+        })()
+      : Promise.resolve(),
+    onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier }),
+  ]);
   if (!onecliApplied) {
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
