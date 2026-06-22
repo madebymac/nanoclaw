@@ -51,6 +51,14 @@ import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
+// Cache of agent identifiers for which ensureAgent + ensureAgentSecretModeAll
+// have already been confirmed on the current host process. OneCLI agent
+// registration is idempotent and stable within a process lifetime, so we skip
+// the two HTTP roundtrips (~500ms total) on every spawn after the first.
+// Cleared on process restart, which safely re-registers if OneCLI was
+// restarted or its state was wiped in the interim.
+const ensuredAgentIdentifiers = new Set<string>();
+
 /**
  * Flip a newly-created agent's secret mode from "selective" (OneCLI default)
  * to "all" so every vault secret + connected app matching the request's
@@ -733,12 +741,14 @@ async function buildContainerArgs(
   // applyContainerConfig: applyContainerConfig only needs the agent identifier
   // string (not for the agent to be registered first), so both OneCLI HTTP
   // roundtrips can be in-flight simultaneously — saving ~500 ms per cold
-  // spawn. See #8.
+  // spawn. ensureAgent is also cached: once an identifier is confirmed
+  // registered, we skip the roundtrip on subsequent wakes. See #8.
   const [, onecliApplied] = await Promise.all([
-    agentIdentifier
+    agentIdentifier && !ensuredAgentIdentifiers.has(agentIdentifier)
       ? (async () => {
           await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
           await ensureAgentSecretModeAll(agentIdentifier);
+          ensuredAgentIdentifiers.add(agentIdentifier);
         })()
       : Promise.resolve(),
     onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier }),
