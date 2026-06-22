@@ -14,6 +14,7 @@
  *
  * See `docs/claude-md-composition.md` for the full design.
  */
+import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -34,13 +35,50 @@ const SHARED_MCP_TOOLS_CONTAINER_BASE = '/app/src/mcp-tools';
 const MCP_TOOLS_HOST_SUBPATH = path.join('container', 'agent-runner', 'src', 'mcp-tools');
 
 const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.local.md for per-group content. -->';
+const FRAGMENT_HASH_FILE = '.fragment-hash';
+
+/** Compute a hash over the inputs that determine the fragment set. */
+function computeFragmentHash(
+  mcpServersJson: string,
+  skillsJson: string,
+  cliScope: string | null | undefined,
+  availableSkills: string[],
+  availableMcpInstructions: string[],
+): string {
+  const h = createHash('sha256');
+  h.update(mcpServersJson);
+  h.update('\0');
+  h.update(skillsJson);
+  h.update('\0');
+  h.update(cliScope ?? '');
+  h.update('\0');
+  h.update(availableSkills.sort().join(','));
+  h.update('\0');
+  h.update(availableMcpInstructions.sort().join(','));
+  return h.digest('hex');
+}
+
+function readFragmentHash(groupDir: string): string | null {
+  try {
+    return fs.readFileSync(path.join(groupDir, FRAGMENT_HASH_FILE), 'utf-8').trim();
+  } catch {
+    return null;
+  }
+}
+
+function writeFragmentHash(groupDir: string, hash: string): void {
+  fs.writeFileSync(path.join(groupDir, FRAGMENT_HASH_FILE), hash + '\n');
+}
+
+
 
 /**
  * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
  * fragments, and MCP server fragments declared in `container.json`. Creates
  * an empty `CLAUDE.local.md` if missing.
  */
-export function composeGroupClaudeMd(group: AgentGroup): void {
+/** Returns true when recomposition ran, false when the fragment set was unchanged. */
+export function composeGroupClaudeMd(group: AgentGroup): boolean {
   const groupDir = path.resolve(GROUPS_DIR, group.folder);
   if (!fs.existsSync(groupDir)) {
     fs.mkdirSync(groupDir, { recursive: true });
@@ -59,11 +97,31 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   const mcpServers: Record<string, McpServerConfig> = configRow
     ? (JSON.parse(configRow.mcp_servers) as Record<string, McpServerConfig>)
     : {};
+
+  // Compute the hash of all inputs that determine the fragment set. If the
+  // hash matches the stored marker, the fragment set and CLAUDE.md are already
+  // correct — skip all filesystem work for this spawn.
+  const skillsHostDir = path.join(process.cwd(), 'container', 'skills');
+  const availableSkills = fs.existsSync(skillsHostDir) ? fs.readdirSync(skillsHostDir) : [];
+  const mcpToolsHostDirForHash = path.join(process.cwd(), MCP_TOOLS_HOST_SUBPATH);
+  const availableMcpInstructions = fs.existsSync(mcpToolsHostDirForHash)
+    ? fs.readdirSync(mcpToolsHostDirForHash).filter((e) => e.endsWith('.instructions.md'))
+    : [];
+  const currentHash = computeFragmentHash(
+    configRow?.mcp_servers ?? '{}',
+    typeof configRow?.skills === 'string' ? configRow.skills : JSON.stringify(configRow?.skills ?? []),
+    configRow?.cli_scope,
+    availableSkills,
+    availableMcpInstructions,
+  );
+  if (readFragmentHash(groupDir) === currentHash) {
+    log.debug('Fragment set unchanged — skipping CLAUDE.md recompose', { group: group.folder });
+    return false;
+  }
   const desired = new Map<string, { type: 'symlink' | 'inline'; content: string }>();
 
   // Skill fragments — every skill that ships an `instructions.md`.
   // TODO (shared-source refactor): respect `container.json` skill selection.
-  const skillsHostDir = path.join(process.cwd(), 'container', 'skills');
   if (fs.existsSync(skillsHostDir)) {
     for (const skillName of fs.readdirSync(skillsHostDir)) {
       const hostFragment = path.join(skillsHostDir, skillName, 'instructions.md');
@@ -133,6 +191,10 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   if (!fs.existsSync(localFile)) {
     fs.writeFileSync(localFile, '');
   }
+
+  // Record the hash so subsequent spawns can skip this work when inputs are unchanged.
+  writeFragmentHash(groupDir, currentHash);
+  return true;
 }
 
 /**
