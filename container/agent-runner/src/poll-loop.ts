@@ -86,15 +86,21 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
   let pollCount = 0;
   let isFirstPoll = true;
+  // Keep the container alive during idle by touching the heartbeat every 5 minutes.
+  // Without this the host sweep's 30-minute ceiling kills an idle-but-healthy
+  // container, forcing a full cold-start on the next message (issue #7).
+  const IDLE_HEARTBEAT_POLLS = Math.round((5 * 60 * 1000) / POLL_INTERVAL_MS); // 5 min in poll ticks
   while (true) {
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
     isFirstPoll = false;
     pollCount++;
 
-    // Periodic heartbeat so we know the loop is alive
-    if (pollCount % 30 === 0) {
+    // Periodic log + idle heartbeat to keep the host sweep from killing a
+    // healthy-but-quiet container before the 30-minute ceiling.
+    if (pollCount % IDLE_HEARTBEAT_POLLS === 0) {
       log(`Poll heartbeat (${pollCount} iterations, ${messages.length} pending)`);
+      touchHeartbeat();
     }
 
     if (messages.length === 0) {
