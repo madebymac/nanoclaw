@@ -5,6 +5,8 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
+import { resolveAutoModel } from './model-routing.js';
+export { resolveAutoModel } from './model-routing.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
@@ -282,6 +284,7 @@ export class ClaudeProvider implements AgentProvider {
     stream.push(input.prompt);
 
     const instructions = input.systemContext?.instructions;
+    const model = this.model === 'auto' ? resolveAutoModel(input.prompt) : this.model;
 
     const sdkResult = sdkQuery({
       prompt: stream,
@@ -297,7 +300,7 @@ export class ClaudeProvider implements AgentProvider {
         ],
         disallowedTools: SDK_DISALLOWED_TOOLS,
         env: this.env,
-        model: this.model,
+        model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',
