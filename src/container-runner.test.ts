@@ -1,6 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { fixProxyGatewayPort, resolveProviderName } from './container-runner.js';
+import {
+  fixProxyGatewayPort,
+  GH_TOKEN_LIFETIME_MS,
+  GH_TOKEN_REFRESH_THRESHOLD_MS,
+  maybeRefreshGithubToken,
+  resolveProviderName,
+} from './container-runner.js';
 
 describe('resolveProviderName', () => {
   it('prefers session over container config', () => {
@@ -102,5 +108,32 @@ describe('fixProxyGatewayPort', () => {
     const args = [...before];
     fixProxyGatewayPort(args, 'http://172.17.0.1:10354');
     expect(args).toEqual(before);
+  });
+});
+
+describe('GH_TOKEN refresh constants', () => {
+  it('exports the correct lifetime and threshold values', () => {
+    expect(GH_TOKEN_LIFETIME_MS).toBe(60 * 60 * 1000);
+    expect(GH_TOKEN_REFRESH_THRESHOLD_MS).toBe(5 * 60 * 1000);
+  });
+
+  it('refresh window starts at 55 minutes after mint', () => {
+    const refreshWindowMs = GH_TOKEN_LIFETIME_MS - GH_TOKEN_REFRESH_THRESHOLD_MS;
+    expect(refreshWindowMs).toBe(55 * 60 * 1000);
+  });
+});
+
+describe('maybeRefreshGithubToken', () => {
+  it('is a no-op when no active container matches the sessionId', () => {
+    // No container has been spawned in this test process, so the activeContainers
+    // Map is empty. The function must not throw.
+    expect(() => {
+      maybeRefreshGithubToken('agent-group-123', 'session-999-does-not-exist');
+    }).not.toThrow();
+  });
+
+  it('is callable from the host-sweep import path (smoke test)', () => {
+    // Verify the function is exported and importable so the sweep can call it.
+    expect(typeof maybeRefreshGithubToken).toBe('function');
   });
 });

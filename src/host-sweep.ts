@@ -44,7 +44,7 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { isContainerRunning, killContainer, maybeRefreshGithubToken, wakeContainer } from './container-runner.js';
 import type { Session } from './types.js';
 
 /**
@@ -187,7 +187,17 @@ async function sweepSession(session: Session): Promise<void> {
 
     const alive = isContainerRunning(session.id);
 
-    // 3. Running-container SLA: absolute ceiling + per-claim stuck rules.
+    // 3a. Proactive GitHub token refresh for long-running containers.
+    // wakeContainer triggers a refresh on message arrival, but a container
+    // can stay alive for hours with no new messages — the token would expire
+    // silently. maybeRefreshGithubToken is a no-op when the token is still
+    // fresh; when it reaches the 55-min threshold it pushes a new token in
+    // without interrupting the running session. See #66.
+    if (alive) {
+      maybeRefreshGithubToken(session.agent_group_id, session.id);
+    }
+
+    // 3b. Running-container SLA: absolute ceiling + per-claim stuck rules.
     if (alive && outDb) {
       enforceRunningContainerSla(inDb, outDb, session, agentGroup.id);
     }
