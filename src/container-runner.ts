@@ -523,13 +523,15 @@ function buildMounts(
   // is a no-op for groups that have spawned before.
   initGroupFilesystem(agentGroup);
 
-  // Sync skill symlinks based on container.json selection before mounting.
+  // Recompose CLAUDE.md and sync skill symlinks only when the fragment set has
+  // changed. composeGroupClaudeMd hashes the inputs (skills, MCP config,
+  // cli_scope) and returns false without touching the filesystem if unchanged.
+  // syncSkillSymlinks is driven by the same inputs, so we gate it on the same
+  // result to avoid redundant directory scans on every spawn.
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
-  syncSkillSymlinks(claudeDir, containerConfig);
-
-  // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
-  // fragments, and MCP server instructions. See `claude-md-compose.ts`.
-  composeGroupClaudeMd(agentGroup);
+  if (composeGroupClaudeMd(agentGroup)) {
+    syncSkillSymlinks(claudeDir, containerConfig);
+  }
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
