@@ -1,5 +1,6 @@
 import type { McpServerConfig } from '../../container-config.js';
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
+import { initGroupFilesystem } from '../../group-init.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { getSession } from '../../db/sessions.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -58,6 +59,15 @@ registerResource({
     { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
   ],
   operations: { list: 'open', get: 'open', create: 'approval', update: 'approval', delete: 'approval' },
+  onCreate: (row) => {
+    initGroupFilesystem({
+      id: row.id as string,
+      name: row.name as string,
+      folder: row.folder as string,
+      agent_provider: null,
+      created_at: row.created_at as string,
+    });
+  },
   customOperations: {
     restart: {
       access: 'approval',
