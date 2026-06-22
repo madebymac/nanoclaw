@@ -18,6 +18,13 @@ import { createStreamExtractor, detectOpenBlock, type ExtractedBlock, type OpenB
 
 const STREAM_REPLIES = process.env.NANOCLAW_STREAM_REPLIES === '1';
 
+// Ack-first: when enabled, write a short ack to the follow-up message's
+// channel when a turn has been running for TURN_ACK_AFTER_MS without
+// responding, so the user knows their message was received.
+const TURN_ACK_ENABLED = process.env.NANOCLAW_TURN_ACK === '1';
+const TURN_ACK_TEXT = process.env.NANOCLAW_TURN_ACK_TEXT || '...';
+const TURN_ACK_AFTER_MS = Math.max(0, parseInt(process.env.NANOCLAW_TURN_ACK_AFTER_MS || '5000', 10) || 5000);
+
 /**
  * Throttle for `stream_edit` flushes while a `<message>` block is still open.
  * 1500ms gives a comfortable margin over Telegram's 1-edit/sec/chat limit
@@ -290,6 +297,8 @@ async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  const turnStartedAt = Date.now();
+  let ackSent = false;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -351,6 +360,20 @@ async function processQuery(
 
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
+
+        if (TURN_ACK_ENABLED && !ackSent && Date.now() - turnStartedAt >= TURN_ACK_AFTER_MS) {
+          const ackRouting = extractRouting(newMessages);
+          writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: ackRouting.platformId,
+            channel_type: ackRouting.channelType,
+            thread_id: ackRouting.threadId,
+            content: JSON.stringify({ text: TURN_ACK_TEXT }),
+          });
+          ackSent = true;
+          log(`Ack sent for follow-up during long turn (${Math.round((Date.now() - turnStartedAt) / 1000)}s elapsed)`);
+        }
 
         // Run pre-task scripts on follow-ups too — without this, a task that
         // arrives during an active query (e.g. a */10 monitoring cron) bypasses
