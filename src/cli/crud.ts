@@ -69,6 +69,12 @@ export interface ResourceDef {
   };
   /** Non-standard verbs (grant, revoke, add, remove, restart, etc.). */
   customOperations?: Record<string, CustomOperation>;
+  /**
+   * Optional post-create hook. Called with the newly-inserted row after a
+   * successful genericCreate INSERT. Use this for side-effects that must
+   * happen alongside DB creation (e.g. filesystem scaffolding for groups).
+   */
+  onCreate?: (row: Record<string, unknown>) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +164,9 @@ function genericCreate(def: ResourceDef) {
     getDb()
       .prepare(`INSERT INTO ${def.table} (${colNames.join(', ')}) VALUES (${placeholders.join(', ')})`)
       .run(values);
+    if (def.onCreate) {
+      await def.onCreate(values);
+    }
     return values;
   };
 }
