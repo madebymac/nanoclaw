@@ -137,9 +137,13 @@ async function refreshGithubTokenInContainer(
   agentGroupId: string,
   entry: { containerName: string; tokenMintedAt?: number },
 ): Promise<void> {
-  if (!entry.tokenMintedAt) return;
-  const age = Date.now() - entry.tokenMintedAt;
-  if (age < GH_TOKEN_LIFETIME_MS - GH_TOKEN_REFRESH_THRESHOLD_MS) return;
+  if (entry.tokenMintedAt !== undefined) {
+    const age = Date.now() - entry.tokenMintedAt;
+    if (age < GH_TOKEN_LIFETIME_MS - GH_TOKEN_REFRESH_THRESHOLD_MS) return;
+  }
+  // If tokenMintedAt is undefined the initial mint failed at spawn time —
+  // fall through and attempt a refresh now so long-running containers that
+  // started without a token can still pick one up on the next wake.
 
   // Deduplicate: two messages arriving in the same tick both pass the age
   // check. Guard with a per-container in-flight set (mirrors wakePromises).
