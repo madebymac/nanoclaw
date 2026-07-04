@@ -170,14 +170,26 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     return;
   }
 
-  const originChannelType = session.messaging_group_id
-    ? (getMessagingGroup(session.messaging_group_id)?.channel_type ?? '')
-    : '';
+  const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : null;
+  const originChannelType = originMg?.channel_type ?? '';
 
-  const target = await pickApprovalDelivery(approvers, originChannelType);
-  if (!target) {
+  const dmTarget = await pickApprovalDelivery(approvers, originChannelType);
+
+  // Fall back to the originating messaging group when no approver has a
+  // reachable DM channel — approval cards still reach a human and the
+  // response handler resolves by questionId regardless of where it arrives.
+  const deliveryMg = dmTarget?.messagingGroup ?? originMg;
+  const deliveryUserId = dmTarget?.userId ?? approvers[0] ?? '';
+  if (!deliveryMg) {
     notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
     return;
+  }
+  if (!dmTarget) {
+    log.warn('requestApproval: no admin DM channel found, delivering to origin messaging group', {
+      action,
+      agentGroupId: session.agent_group_id,
+      messagingGroupId: deliveryMg.id,
+    });
   }
 
   const approvalId = `appr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -197,8 +209,8 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   if (adapter) {
     try {
       await adapter.deliver(
-        target.messagingGroup.channel_type,
-        target.messagingGroup.platform_id,
+        deliveryMg.channel_type,
+        deliveryMg.platform_id,
         null,
         'chat-sdk',
         JSON.stringify({
@@ -211,10 +223,10 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
       );
     } catch (err) {
       log.error('Failed to deliver approval card', { action, approvalId, err });
-      notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
+      notifyAgent(session, `${action} failed: could not deliver approval request to ${deliveryUserId}.`);
       return;
     }
   }
 
-  log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+  log.info('Approval requested', { action, approvalId, agentName, approver: deliveryUserId });
 }
