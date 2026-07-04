@@ -44,6 +44,8 @@ function computeFragmentHash(
   cliScope: string | null | undefined,
   availableSkills: string[],
   availableMcpInstructions: string[],
+  skillsHostDir: string,
+  mcpToolsHostDir: string,
 ): string {
   const h = createHash('sha256');
   h.update(mcpServersJson);
@@ -55,6 +57,20 @@ function computeFragmentHash(
   h.update(availableSkills.sort().join(','));
   h.update('\0');
   h.update(availableMcpInstructions.sort().join(','));
+  // Hash file content so changes to skill/MCP instructions invalidate the cache
+  for (const skillName of availableSkills.sort()) {
+    const fragPath = path.join(skillsHostDir, skillName, 'instructions.md');
+    if (fs.existsSync(fragPath)) {
+      h.update(fs.readFileSync(fragPath));
+    }
+  }
+  h.update('\0');
+  for (const entry of availableMcpInstructions.sort()) {
+    const fragPath = path.join(mcpToolsHostDir, entry);
+    if (fs.existsSync(fragPath)) {
+      h.update(fs.readFileSync(fragPath));
+    }
+  }
   return h.digest('hex');
 }
 
@@ -113,6 +129,8 @@ export function composeGroupClaudeMd(group: AgentGroup): boolean {
     configRow?.cli_scope,
     availableSkills,
     availableMcpInstructions,
+    skillsHostDir,
+    mcpToolsHostDirForHash,
   );
   if (readFragmentHash(groupDir) === currentHash) {
     log.debug('Fragment set unchanged — skipping CLAUDE.md recompose', { group: group.folder });
