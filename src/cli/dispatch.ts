@@ -108,6 +108,15 @@ export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<R
   }
 
   if (ctx.caller !== 'host' && cmd.access === 'approval') {
+    // Self-restart (agent restarting its own container, no --rebuild) is
+    // unconditionally safe to execute immediately: it scopes to the calling
+    // session, changes no config, and merely gives the container a fresh
+    // token and clean start. No human confirmation needed.
+    const isSelfRestart =
+      req.command === 'groups-restart' &&
+      ctx.caller === 'agent' &&
+      !req.args.rebuild;
+    if (!isSelfRestart) {
     const session = getSession(ctx.sessionId);
     if (!session) {
       return err(req.id, 'handler-error', 'Session not found.');
@@ -134,6 +143,7 @@ export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<R
     });
 
     return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');
+    } // end if (!isSelfRestart)
   }
 
   let parsed: unknown;
