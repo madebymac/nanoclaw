@@ -36,4 +36,24 @@ describe('resolveAutoModel', () => {
   it('returns Sonnet for "debug" keyword regardless of length', () => {
     expect(resolveAutoModel('debug this')).toBe(SONNET);
   });
+
+  it('returns Sonnet for "analyze" (stem analyz + word char)', () => {
+    expect(resolveAutoModel('analyze this')).toBe(SONNET);
+  });
+
+  it('returns Sonnet for "create" (stem creat + word char)', () => {
+    expect(resolveAutoModel('create a function')).toBe(SONNET);
+  });
+
+  it('returns Sonnet for "migrate" (stem migrat + word char)', () => {
+    expect(resolveAutoModel('migrate the database')).toBe(SONNET);
+  });
+
+  it('returns Sonnet for "optimize" (stem optimiz + word char)', () => {
+    expect(resolveAutoModel('optimize this query')).toBe(SONNET);
+  });
+
+  it('returns Sonnet for "generate" (stem generat + word char)', () => {
+    expect(resolveAutoModel('generate a report')).toBe(SONNET);
+  });
 });
