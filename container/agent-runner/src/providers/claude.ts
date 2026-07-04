@@ -290,7 +290,15 @@ export class ClaudeProvider implements AgentProvider {
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
-        systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
+        systemPrompt: {
+          type: 'preset' as const,
+          preset: 'claude_code' as const,
+          ...(instructions ? { append: instructions } : {}),
+          // Strip per-session dynamic sections (cwd, auto-memory, git status) from the
+          // system prompt so the static prefix is eligible for Anthropic's 5-min prompt
+          // cache. The SDK re-injects the stripped content as the first user message.
+          excludeDynamicSections: true,
+        },
         allowedTools: [
           ...TOOL_ALLOWLIST,
           ...Object.keys(this.mcpServers).map(mcpAllowPattern),
