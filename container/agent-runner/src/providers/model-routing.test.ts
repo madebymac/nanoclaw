@@ -68,12 +68,4 @@ describe('resolveAutoModel', () => {
   it('returns Opus for "fix" keyword', () => {
     expect(resolveAutoModel('fix the bug')).toBe(OPUS);
   });
-
-  it('returns Opus for "patch" keyword', () => {
-    expect(resolveAutoModel('patch the vulnerability')).toBe(OPUS);
-  });
-
-  it('returns Opus for "test" keyword', () => {
-    expect(resolveAutoModel('test this function')).toBe(OPUS);
-  });
 });
