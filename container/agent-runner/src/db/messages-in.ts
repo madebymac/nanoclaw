@@ -120,6 +120,20 @@ export function markCompleted(ids: string[]): void {
   })();
 }
 
+/**
+ * Re-open messages for a retry: delete their processing_ack rows so the next
+ * getPendingMessages() poll returns them again. Used by the auto-route
+ * fallback path — the batch is re-run once the heavy route is cooling down.
+ */
+export function resetProcessing(ids: string[]): void {
+  if (ids.length === 0) return;
+  const db = getOutboundDb();
+  const stmt = db.prepare('DELETE FROM processing_ack WHERE message_id = ?');
+  db.transaction(() => {
+    for (const id of ids) stmt.run(id);
+  })();
+}
+
 /** Mark a single message as failed — writes to processing_ack in outbound.db. */
 export function markFailed(id: string): void {
   getOutboundDb()

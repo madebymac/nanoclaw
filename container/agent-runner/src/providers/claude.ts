@@ -5,8 +5,9 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
-import { resolveAutoModel } from './model-routing.js';
+import { AUTO_ROUTE_HEAVY_MODEL, markHeavyRouteFailure, resolveAutoModel } from './model-routing.js';
 export { resolveAutoModel } from './model-routing.js';
+import { AutoRouteFallbackError } from './types.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
@@ -252,6 +253,18 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
+/**
+ * Caps on consecutive `api_retry` events from the SDK. Without a cap the SDK
+ * retries a failing API call indefinitely — the user sees an eternal typing
+ * indicator and never an error (this is exactly how the July 2026 Opus
+ * routing outage presented). The auto-routed heavy model gets a low cap and
+ * a fallback path (cool the heavy route down, requeue the batch so it
+ * re-routes to the default model); explicitly configured models have no safe
+ * fallback, so they get a higher cap and surface the error to the user.
+ */
+const HEAVY_ROUTE_MAX_API_RETRIES = 3;
+const MAX_CONSECUTIVE_API_RETRIES = 8;
+
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
 
@@ -285,6 +298,8 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
     const model = this.model === 'auto' ? resolveAutoModel(input.prompt) : this.model;
+    const isAutoRoutedHeavy = this.model === 'auto' && model === AUTO_ROUTE_HEAVY_MODEL;
+    if (this.model === 'auto') log(`Auto-routed to ${model}`);
 
     const sdkResult = sdkQuery({
       prompt: stream,
@@ -334,9 +349,36 @@ export class ClaudeProvider implements AgentProvider {
       // poll-loop sees a monotonically growing string and can early-dispatch
       // complete <message to="..."> blocks as they close.
       let assistantText = '';
+      let consecutiveApiRetries = 0;
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
+
+        const isApiRetry = message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry';
+        if (isApiRetry) {
+          consecutiveApiRetries++;
+          if (isAutoRoutedHeavy && consecutiveApiRetries >= HEAVY_ROUTE_MAX_API_RETRIES) {
+            markHeavyRouteFailure();
+            try {
+              await (sdkResult as { interrupt?: () => Promise<void> }).interrupt?.();
+            } catch {
+              /* best-effort — the SDK process dies with the query either way */
+            }
+            throw new AutoRouteFallbackError(
+              `Auto-routed model ${model} hit ${consecutiveApiRetries} consecutive API retries — cooling down heavy route`,
+            );
+          }
+          if (consecutiveApiRetries >= MAX_CONSECUTIVE_API_RETRIES) {
+            try {
+              await (sdkResult as { interrupt?: () => Promise<void> }).interrupt?.();
+            } catch {
+              /* best-effort */
+            }
+            throw new Error(`Model ${model ?? '(default)'} failed after ${consecutiveApiRetries} consecutive API retries`);
+          }
+        } else {
+          consecutiveApiRetries = 0;
+        }
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };

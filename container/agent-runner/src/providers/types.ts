@@ -79,6 +79,19 @@ export interface AgentQuery {
   abort(): void;
 }
 
+/**
+ * Thrown by a provider when the auto-routed heavy model keeps failing at the
+ * API layer. The heavy route is put on cooldown before this is thrown, so the
+ * poll loop's response is to requeue the batch — the retry resolves to the
+ * default model and the user gets a normal reply instead of silence.
+ */
+export class AutoRouteFallbackError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AutoRouteFallbackError';
+  }
+}
+
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
   | { type: 'result'; text: string | null }
