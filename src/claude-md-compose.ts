@@ -86,8 +86,6 @@ function writeFragmentHash(groupDir: string, hash: string): void {
   fs.writeFileSync(path.join(groupDir, FRAGMENT_HASH_FILE), hash + '\n');
 }
 
-
-
 /**
  * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
  * fragments, and MCP server fragments declared in `container.json`. Creates
