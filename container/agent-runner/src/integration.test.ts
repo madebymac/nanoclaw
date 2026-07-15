@@ -5,6 +5,7 @@ import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { getContinuation, setContinuation } from './db/session-state.js';
 import { MockProvider } from './providers/mock.js';
+import { AutoRouteFallbackError } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
 beforeEach(() => {
@@ -410,6 +411,123 @@ describe('poll loop — /clear command', () => {
     await loopPromise.catch(() => {});
   });
 });
+
+describe('poll loop — API error pass-through', () => {
+  it('surfaces provider error events to the user before the result arrives', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new ErrorEventProvider(
+      { type: 'error', message: 'Anthropic API rate_limit (HTTP 429) — retry 1/10 on claude-opus-4-7', retryable: true },
+      '<message to="discord-test">recovered fine</message>',
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length >= 2, 2000);
+    controller.abort();
+
+    const texts = getUndeliveredMessages().map((m) => JSON.parse(m.content).text as string);
+    const notice = texts.find((t) => t.startsWith('⚠️'));
+    expect(notice).toBeDefined();
+    expect(notice).toContain('rate_limit (HTTP 429)');
+    expect(notice).toContain('retrying');
+    expect(texts).toContain('recovered fine');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('requeues the batch and notifies the user on auto-route fallback', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'please fix the bug' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new FallbackThenSucceedProvider('<message to="discord-test">answered by fallback</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
+
+    await waitFor(() => getUndeliveredMessages().some((m) => (JSON.parse(m.content).text as string).includes('answered by fallback')), 3000);
+    controller.abort();
+
+    const texts = getUndeliveredMessages().map((m) => JSON.parse(m.content).text as string);
+    // User was told about the fallback, then got a real answer from the retry.
+    expect(texts.some((t) => t.startsWith('⚠️') && t.includes('default model'))).toBe(true);
+    expect(texts).toContain('answered by fallback');
+    // Both query attempts ran, and the batch is no longer pending.
+    expect(provider.queryCount).toBe(2);
+    expect(getPendingMessages()).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
+});
+
+/**
+ * Provider that emits one error event, then a normal result.
+ */
+class ErrorEventProvider {
+  readonly supportsNativeSlashCommands = false;
+  private errorEvent: { type: 'error'; message: string; retryable: boolean };
+  private resultText: string;
+
+  constructor(errorEvent: { type: 'error'; message: string; retryable: boolean }, resultText: string) {
+    this.errorEvent = errorEvent;
+    this.resultText = resultText;
+  }
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  query(_input: { prompt: string; cwd: string }) {
+    const { errorEvent, resultText } = this;
+    return {
+      push() {},
+      end() {},
+      abort() {},
+      events: (async function* () {
+        yield { type: 'init' as const, continuation: 'err-session' };
+        yield errorEvent;
+        yield { type: 'result' as const, text: resultText };
+      })(),
+    };
+  }
+}
+
+/**
+ * Provider whose first query throws AutoRouteFallbackError (as the Claude
+ * provider does when the auto-routed heavy model keeps failing) and whose
+ * second query succeeds — simulating the requeue-and-retry-on-default path.
+ */
+class FallbackThenSucceedProvider {
+  readonly supportsNativeSlashCommands = false;
+  queryCount = 0;
+  private resultText: string;
+
+  constructor(resultText: string) {
+    this.resultText = resultText;
+  }
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  query(_input: { prompt: string; cwd: string }) {
+    this.queryCount++;
+    const attempt = this.queryCount;
+    const { resultText } = this;
+    return {
+      push() {},
+      end() {},
+      abort() {},
+      events: (async function* () {
+        if (attempt === 1) {
+          throw new AutoRouteFallbackError(
+            'Auto-routed model claude-opus-4-7 failing: rate_limit (HTTP 429) (3 consecutive API retries) — cooling down heavy route',
+          );
+        }
+        yield { type: 'init' as const, continuation: 'fallback-session' };
+        yield { type: 'result' as const, text: resultText };
+      })(),
+    };
+  }
+}
 
 /**
  * Provider that throws on every query, simulating API failures.

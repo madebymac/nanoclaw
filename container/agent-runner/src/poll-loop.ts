@@ -36,6 +36,12 @@ const TURN_ACK_AFTER_MS = Math.max(0, parseInt(process.env.NANOCLAW_TURN_ACK_AFT
  */
 const STREAM_EDIT_MIN_INTERVAL_MS = 1500;
 
+// API-error pass-through: at most one error notice per throttle window, and
+// never the same text twice within the dedupe window. Keeps a retry storm
+// from flooding the chat while still telling the user what's failing.
+const API_ERROR_NOTICE_THROTTLE_MS = 60_000;
+const API_ERROR_NOTICE_DEDUPE_MS = 10 * 60_000;
+
 // Idle / accumulate-only sleep between poll iterations when there's no
 // trigger=1 message to act on. 200ms matches the symmetric host-side
 // delivery poll cadence — worst-case wake lag for a freshly-inserted
@@ -229,6 +235,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         // re-resolves 'auto' to the default model and answers normally.
         log('Auto-route fallback — requeueing batch to retry on the default model');
         requeueForFallback = true;
+        // Tell the user what happened; the fallback model's answer follows.
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `⚠️ ${errMsg}. Answering with the default model instead…` }),
+        });
       } else {
         // Stale/corrupt continuation recovery: ask the provider whether
         // this error means the stored continuation is unusable, and clear
@@ -314,6 +329,11 @@ async function processQuery(
   let unwrappedNudged = false;
   const turnStartedAt = Date.now();
   let ackSent = false;
+  // API-error pass-through: surface provider error events in chat so the
+  // user sees what's failing instead of an eternal typing indicator.
+  // Throttled + deduped so an SDK retry storm doesn't spam the chat.
+  let lastErrorNoticeAt = 0;
+  let lastErrorNoticeText = '';
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -436,6 +456,25 @@ async function processQuery(
     for await (const event of query.events) {
       handleEvent(event, routing);
       touchHeartbeat();
+
+      if (event.type === 'error') {
+        const notice = event.retryable ? `⚠️ ${event.message} — retrying…` : `⚠️ ${event.message}`;
+        const now = Date.now();
+        const throttled = now - lastErrorNoticeAt < API_ERROR_NOTICE_THROTTLE_MS;
+        const duplicate = event.message === lastErrorNoticeText && now - lastErrorNoticeAt < API_ERROR_NOTICE_DEDUPE_MS;
+        if (!throttled && !duplicate) {
+          lastErrorNoticeAt = now;
+          lastErrorNoticeText = event.message;
+          writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({ text: notice }),
+          });
+        }
+      }
 
       if (event.type === 'partial' && streamExtractor) {
         const newlyClosed = streamExtractor.extractNewlyClosed(event.text);
