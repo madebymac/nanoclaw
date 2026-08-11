@@ -81,7 +81,12 @@ export interface AgentQuery {
 
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
-  | { type: 'result'; text: string | null }
+  /**
+   * End of a turn. `costUsd` is what the turn cost, when the provider
+   * reports it — the poll loop books it against the rolling spend window.
+   * Providers with no cost signal omit it and simply never move the ledger.
+   */
+  | { type: 'result'; text: string | null; costUsd?: number }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**

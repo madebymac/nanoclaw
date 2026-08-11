@@ -14,6 +14,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import { checkSpend, formatSpendBlockMessage, recordSpend } from './spend-guard.js';
 import { createStreamExtractor, detectOpenBlock, type ExtractedBlock, type OpenBlock } from './stream-dispatch.js';
 
 const STREAM_REPLIES = process.env.NANOCLAW_STREAM_REPLIES === '1';
@@ -34,6 +35,16 @@ const TURN_ACK_AFTER_MS = Math.max(0, parseInt(process.env.NANOCLAW_TURN_ACK_AFT
  * delivered message visibly grows.
  */
 const STREAM_EDIT_MIN_INTERVAL_MS = 1500;
+
+// API-error pass-through: at most one notice per throttle window, and never
+// the same text twice inside the dedupe window. The user learns what's
+// failing without a retry storm flooding the chat.
+const API_ERROR_NOTICE_THROTTLE_MS = 60_000;
+const API_ERROR_NOTICE_DEDUPE_MS = 10 * 60_000;
+
+// How often to re-tell the user the spend guard is still blocking. Messages
+// keep arriving while it's tripped; one notice per window is enough.
+const SPEND_BLOCK_NOTICE_INTERVAL_MS = 10 * 60_000;
 
 // Idle / accumulate-only sleep between poll iterations when there's no
 // trigger=1 message to act on. 200ms matches the symmetric host-side
@@ -93,6 +104,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
   let pollCount = 0;
   let isFirstPoll = true;
+  let lastSpendNoticeAt = 0;
   // Keep the container alive during idle by touching the heartbeat every 5 minutes.
   // Without this the host sweep's 30-minute ceiling kills an idle-but-healthy
   // container, forcing a full cold-start on the next message (issue #7).
@@ -189,6 +201,30 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     if (keep.length === 0) {
       log(`All ${normalMessages.length} non-command message(s) gated by script, skipping query`);
+      continue;
+    }
+
+    // Spend guard: refuse to open a new query once this session has spent
+    // its rolling-window budget. The batch is marked completed rather than
+    // left pending — holding it would spin this loop at poll cadence and
+    // re-notify forever. The user is told once per notice interval, so a
+    // tripped guard is loud the first time and quiet after.
+    const spend = checkSpend();
+    if (spend.blocked) {
+      const now = Date.now();
+      if (now - lastSpendNoticeAt >= SPEND_BLOCK_NOTICE_INTERVAL_MS) {
+        lastSpendNoticeAt = now;
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: formatSpendBlockMessage(spend) }),
+        });
+      }
+      log(`Spend guard blocking: $${spend.spentUsd.toFixed(4)} of $${spend.limitUsd.toFixed(2)} used`);
+      markCompleted(ids.filter((id) => !commandIds.includes(id)));
       continue;
     }
 
@@ -299,6 +335,11 @@ async function processQuery(
   let unwrappedNudged = false;
   const turnStartedAt = Date.now();
   let ackSent = false;
+  // API-error pass-through state: surface provider errors in chat so a
+  // failing turn ends with an explanation instead of an eternal typing
+  // indicator. Throttled + deduped so a retry storm doesn't spam the chat.
+  let lastErrorNoticeAt = 0;
+  let lastErrorNoticeText = '';
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -422,6 +463,25 @@ async function processQuery(
       handleEvent(event, routing);
       touchHeartbeat();
 
+      if (event.type === 'error') {
+        const notice = event.retryable ? `⚠️ ${event.message} — retrying…` : `⚠️ ${event.message}`;
+        const now = Date.now();
+        const throttled = now - lastErrorNoticeAt < API_ERROR_NOTICE_THROTTLE_MS;
+        const duplicate = event.message === lastErrorNoticeText && now - lastErrorNoticeAt < API_ERROR_NOTICE_DEDUPE_MS;
+        if (!throttled && !duplicate) {
+          lastErrorNoticeAt = now;
+          lastErrorNoticeText = event.message;
+          writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({ text: notice }),
+          });
+        }
+      }
+
       if (event.type === 'partial' && streamExtractor) {
         const newlyClosed = streamExtractor.extractNewlyClosed(event.text);
         for (const block of newlyClosed) {
@@ -462,6 +522,9 @@ async function processQuery(
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
       } else if (event.type === 'result') {
+        // Book what the turn cost against the rolling window before anything
+        // else — a turn that produced no text still spent money.
+        if (typeof event.costUsd === 'number') recordSpend(event.costUsd);
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
         // stale 'processing' claims while the query stays open for

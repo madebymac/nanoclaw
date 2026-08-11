@@ -6,6 +6,7 @@ import { getPendingMessages } from './db/messages-in.js';
 import { getContinuation, setContinuation } from './db/session-state.js';
 import { MockProvider } from './providers/mock.js';
 import { runPollLoop } from './poll-loop.js';
+import { checkSpend, recordSpend } from './spend-guard.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -347,6 +348,146 @@ describe('poll loop — provider error recovery', () => {
     await loopPromise.catch(() => {});
   });
 });
+
+describe('poll loop — API error pass-through', () => {
+  it('surfaces provider error events to the user alongside the result', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new ErrorEventProvider(
+      { type: 'error', message: 'Anthropic API rate_limit (HTTP 429) — retry 1/10 on claude-sonnet-4-6', retryable: true },
+      '<message to="discord-test">recovered fine</message>',
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length >= 2, 2000);
+    controller.abort();
+
+    const texts = getUndeliveredMessages().map((m) => JSON.parse(m.content).text as string);
+    const notice = texts.find((t) => t.startsWith('⚠️'));
+    expect(notice).toBeDefined();
+    expect(notice).toContain('rate_limit (HTTP 429)');
+    expect(notice).toContain('retrying');
+    expect(texts).toContain('recovered fine');
+
+    await loopPromise.catch(() => {});
+  });
+});
+
+describe('poll loop — spend guard', () => {
+  const KEY = 'NANOCLAW_SPEND_LIMIT_USD';
+  let savedLimit: string | undefined;
+
+  beforeEach(() => {
+    savedLimit = process.env[KEY];
+  });
+
+  afterEach(() => {
+    if (savedLimit === undefined) delete process.env[KEY];
+    else process.env[KEY] = savedLimit;
+  });
+
+  it('books reported turn cost against the rolling window', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new CostReportingProvider(1.25, '<message to="discord-test">done</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    expect(checkSpend().spentUsd).toBeCloseTo(1.25, 5);
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('refuses to query and tells the user once the window budget is spent', async () => {
+    process.env[KEY] = '1';
+    recordSpend(5);
+
+    insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new CostReportingProvider(1, '<message to="discord-test">should never run</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    const texts = getUndeliveredMessages().map((m) => JSON.parse(m.content).text as string);
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toContain('Spend guard tripped');
+    expect(texts[0]).toContain('NANOCLAW_SPEND_LIMIT_USD');
+    expect(texts).not.toContain('should never run');
+    // The provider was never opened, and the batch isn't left spinning.
+    expect(provider.queryCount).toBe(0);
+    expect(getPendingMessages()).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
+});
+
+/** Provider that emits one error event, then a normal result. */
+class ErrorEventProvider {
+  readonly supportsNativeSlashCommands = false;
+  private errorEvent: { type: 'error'; message: string; retryable: boolean };
+  private resultText: string;
+
+  constructor(errorEvent: { type: 'error'; message: string; retryable: boolean }, resultText: string) {
+    this.errorEvent = errorEvent;
+    this.resultText = resultText;
+  }
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  query(_input: { prompt: string; cwd: string }) {
+    const { errorEvent, resultText } = this;
+    return {
+      push() {},
+      end() {},
+      abort() {},
+      events: (async function* () {
+        yield { type: 'init' as const, continuation: 'err-session' };
+        yield errorEvent;
+        yield { type: 'result' as const, text: resultText };
+      })(),
+    };
+  }
+}
+
+/** Provider that reports a per-turn cost on its result event. */
+class CostReportingProvider {
+  readonly supportsNativeSlashCommands = false;
+  queryCount = 0;
+  private costUsd: number;
+  private resultText: string;
+
+  constructor(costUsd: number, resultText: string) {
+    this.costUsd = costUsd;
+    this.resultText = resultText;
+  }
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  query(_input: { prompt: string; cwd: string }) {
+    this.queryCount++;
+    const { costUsd, resultText } = this;
+    return {
+      push() {},
+      end() {},
+      abort() {},
+      events: (async function* () {
+        yield { type: 'init' as const, continuation: 'cost-session' };
+        yield { type: 'result' as const, text: resultText, costUsd };
+      })(),
+    };
+  }
+}
 
 describe('poll loop — stale session recovery', () => {
   it('clears continuation when provider reports session invalid', async () => {

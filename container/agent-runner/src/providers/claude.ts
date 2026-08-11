@@ -4,6 +4,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { getSpendLimits } from '../spend-guard.js';
 import { registerProvider } from './provider-registry.js';
 import { resolveAutoModel } from './model-routing.js';
 export { resolveAutoModel } from './model-routing.js';
@@ -252,6 +253,18 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
+/**
+ * Cap on consecutive `api_retry` events before we give up on a query.
+ *
+ * The SDK retries a failing API call on its own schedule and, from our side,
+ * indefinitely — the poll loop touches the heartbeat on every event, so the
+ * host sweep sees a healthy container and never intervenes. The result is an
+ * agent that types forever and never answers, with the real error visible
+ * only in container logs that die with the container. That is exactly how the
+ * July 2026 outage presented. Cap it, then surface the underlying API error.
+ */
+const MAX_CONSECUTIVE_API_RETRIES = 8;
+
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
 
@@ -285,6 +298,10 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
     const model = this.model === 'auto' ? resolveAutoModel(input.prompt) : this.model;
+    if (this.model === 'auto') log(`Auto-routed to ${model}`);
+    // Per-turn ceiling: the SDK stops the query itself and returns an
+    // `error_max_budget_usd` result rather than letting one turn run away.
+    const { turnLimitUsd } = getSpendLimits();
 
     const sdkResult = sdkQuery({
       prompt: stream,
@@ -309,6 +326,7 @@ export class ClaudeProvider implements AgentProvider {
         disallowedTools: SDK_DISALLOWED_TOOLS,
         env: this.env,
         model,
+        ...(turnLimitUsd > 0 ? { maxBudgetUsd: turnLimitUsd } : {}),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',
@@ -328,6 +346,8 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      let consecutiveApiRetries = 0;
+      let lastApiErrorDetail = '';
       // Accumulator for assistant text across the current turn. The SDK
       // emits one `assistant` message per content block (and sometimes
       // intermediate updates); we concatenate all `text` parts so the
@@ -337,6 +357,36 @@ export class ClaudeProvider implements AgentProvider {
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
+
+        // Track consecutive API retries so a permanently-failing call can't
+        // hold the turn open forever. Any non-retry event resets the streak —
+        // we only care about a run of failures with no progress between them.
+        const isApiRetry = message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry';
+        if (isApiRetry) {
+          const retry = message as {
+            attempt?: number;
+            max_retries?: number;
+            error_status?: number | null;
+            error?: string;
+          };
+          lastApiErrorDetail = `${retry.error ?? 'unknown error'}${
+            retry.error_status != null ? ` (HTTP ${retry.error_status})` : ' (connection error)'
+          }`;
+          consecutiveApiRetries++;
+          if (consecutiveApiRetries >= MAX_CONSECUTIVE_API_RETRIES) {
+            try {
+              await (sdkResult as { interrupt?: () => Promise<void> }).interrupt?.();
+            } catch {
+              /* best-effort — the SDK process dies with the query either way */
+            }
+            throw new Error(
+              `Anthropic API failing on model ${model ?? '(default)'}: ${lastApiErrorDetail} ` +
+                `(${consecutiveApiRetries} consecutive retries)`,
+            );
+          }
+        } else {
+          consecutiveApiRetries = 0;
+        }
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };
@@ -358,13 +408,51 @@ export class ClaudeProvider implements AgentProvider {
             }
           }
         } else if (message.type === 'result') {
+          // Error results (error_during_execution, error_max_turns,
+          // error_max_budget_usd, …) carry no result text — surface the
+          // subtype so the turn ends with an explanation rather than silence.
+          const subtype = (message as { subtype?: string }).subtype;
+          if (subtype && subtype !== 'success') {
+            yield {
+              type: 'error',
+              message: `Agent run ended with ${subtype.replace(/^error_/, 'error: ')}`,
+              retryable: false,
+            };
+          }
           const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
+          // Every result reports what the turn cost; the poll loop books it
+          // against the rolling spend window.
+          const costUsd = (message as { total_cost_usd?: number }).total_cost_usd;
           assistantText = '';
-          yield { type: 'result', text };
-        } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
-          yield { type: 'error', message: 'API retry', retryable: true };
-        } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
-          yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
+          yield { type: 'result', text, ...(typeof costUsd === 'number' ? { costUsd } : {}) };
+        } else if (isApiRetry) {
+          const retry = message as { attempt?: number; max_retries?: number };
+          yield {
+            type: 'error',
+            message:
+              `Anthropic API ${lastApiErrorDetail} — retry ${retry.attempt ?? consecutiveApiRetries}` +
+              `/${retry.max_retries ?? '?'} on ${model ?? '(default)'}`,
+            retryable: true,
+          };
+        } else if (
+          (message as { type: string }).type === 'rate_limit_event' ||
+          (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event')
+        ) {
+          // A rate-limit event fires whenever the limit info CHANGES, which
+          // includes status 'allowed'. Only 'rejected' is an actual error —
+          // reporting the rest cried wolf on every quota refresh.
+          const info = (message as { rate_limit_info?: { status?: string; rateLimitType?: string; resetsAt?: number } })
+            .rate_limit_info;
+          if (info?.status === 'rejected') {
+            const resetsMs = info.resetsAt ? (info.resetsAt > 1e12 ? info.resetsAt : info.resetsAt * 1000) : null;
+            const resets = resetsMs ? ` — resets at ${new Date(resetsMs).toISOString()}` : '';
+            yield {
+              type: 'error',
+              message: `Claude usage limit reached (${info.rateLimitType ?? 'unknown limit'})${resets}`,
+              retryable: false,
+              classification: 'quota',
+            };
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
