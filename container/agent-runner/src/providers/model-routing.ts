@@ -5,12 +5,43 @@ const AUTO_ROUTE_CHAR_THRESHOLD = 400;
 const AUTO_ROUTE_COMPLEX_RE =
   /\b(implement|debug|analyz|refactor|migrat|creat|build|deploy|review|explain|optimiz|perform|diagnos|investigat|audits?|generat|scaffold)/i;
 
+export const AUTO_ROUTE_SIMPLE_MODEL = AUTO_ROUTE_HAIKU;
+export const AUTO_ROUTE_COMPLEX_MODEL = AUTO_ROUTE_SONNET;
+
 /**
- * Resolve 'auto' model to a concrete model ID based on prompt characteristics.
- * Short, conversational prompts go to Haiku; anything requiring deeper reasoning
- * or substantial code work goes to Sonnet.
+ * Strip the XML envelope that formatter.ts wraps around inbound messages
+ * (`<context/>`, `<messages>`, `<message …>`, `<task>`, `<quoted_message>`)
+ * and unescape entities, so routing measures the actual message content.
+ *
+ * This is load-bearing for cost. `resolveAutoModel` used to run against the
+ * raw formatted prompt, which meant the envelope counted toward the char
+ * threshold: three one-word chat messages formatted into a batch come to
+ * ~415 characters of mostly `sender=`/`time=`/`reply_to=` ballast, tipping a
+ * trivial turn over the 400-char line. Harmless while the tiers were
+ * Haiku/Sonnet; in July 2026 the tiers were briefly re-pointed at
+ * Sonnet/Opus and the same bug routed essentially all traffic — including
+ * "ok" and "thanks" — to the most expensive model, at up to the full
+ * 165k-token auto-compact window per turn. Route on content, not envelope.
+ */
+export function extractRoutableText(prompt: string): string {
+  return prompt
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Resolve 'auto' model to a concrete model ID based on the message content
+ * extracted from the formatted prompt. Short, conversational prompts go to
+ * Haiku; anything requiring deeper reasoning or substantial code work goes
+ * to Sonnet.
  */
 export function resolveAutoModel(prompt: string): string {
-  const isSimple = prompt.length < AUTO_ROUTE_CHAR_THRESHOLD && !AUTO_ROUTE_COMPLEX_RE.test(prompt);
+  const text = extractRoutableText(prompt);
+  const isSimple = text.length < AUTO_ROUTE_CHAR_THRESHOLD && !AUTO_ROUTE_COMPLEX_RE.test(text);
   return isSimple ? AUTO_ROUTE_HAIKU : AUTO_ROUTE_SONNET;
 }

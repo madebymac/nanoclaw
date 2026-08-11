@@ -147,6 +147,24 @@ One tier of agent self-modification today:
 
 A second tier (direct source-level self-edits via a draft/activate flow) is planned but not yet implemented.
 
+## Spend Guard
+
+Cost ceilings enforced inside the container (`container/agent-runner/src/spend-guard.ts`). Two layers:
+
+| Layer | Env var | Default | What it does |
+|-------|---------|---------|--------------|
+| Per-turn | `NANOCLAW_MAX_TURN_USD` | `5` | Passed to the Claude SDK as `maxBudgetUsd`; the query stops itself and returns an `error_max_budget_usd` result |
+| Rolling window | `NANOCLAW_SPEND_LIMIT_USD` / `NANOCLAW_SPEND_WINDOW_HOURS` | `50` / `24` | Poll loop refuses to open a new query once the session's window total is spent, and says so in chat |
+
+Set either limit to `0` to disable. These are **operator** settings, not per-agent-group ones — they live in the host `.env` and are forwarded into containers by `src/container-runner.ts` (`SPEND_GUARD_ENV_VARS`), so an agent can't raise its own ceiling by editing its container config.
+
+The rolling-window ledger lives in `session_state` in `outbound.db`, so it survives container restarts. It is **per session**: N active sessions can each spend up to the limit. An install-wide ceiling would need host-side aggregation across session DBs.
+
+Related cost invariants worth not breaking:
+
+- **`resolveAutoModel` routes on extracted message text, not the raw prompt** (`providers/model-routing.ts`). The formatter's XML envelope is ~150 chars of `sender=`/`time=`/`reply_to=` ballast per message; counting it toward the 400-char threshold sent trivial turns to the expensive tier. This caused a real credit drain in July 2026 — see `extractRoutableText`.
+- **Consecutive `api_retry` events are capped** (`providers/claude.ts`). The SDK otherwise retries a failing call indefinitely, and because the poll loop touches the heartbeat on every event the host sweep sees a healthy container and never intervenes — the agent types forever and never answers.
+
 ## Container Config
 
 Per-agent-group container runtime config (provider, model, packages, MCP servers, mounts, etc.) lives in the `container_configs` table in the central DB. Materialized to `groups/<folder>/container.json` at spawn time so the container runner can read it. Managed via `ncl groups config get/update` and the self-mod MCP tools.

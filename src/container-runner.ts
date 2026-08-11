@@ -284,6 +284,16 @@ const ONECLI_PROXY_PORT_OFFSET = 1;
 const PROXY_ENV_KEYS = new Set(['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']);
 
 /**
+ * Host env vars forwarded into every agent container to configure the
+ * runner's spend guard. See `container/agent-runner/src/spend-guard.ts`.
+ */
+const SPEND_GUARD_ENV_VARS = [
+  'NANOCLAW_MAX_TURN_USD',
+  'NANOCLAW_SPEND_LIMIT_USD',
+  'NANOCLAW_SPEND_WINDOW_HOURS',
+] as const;
+
+/**
  * Rewrite the proxy port in the env args pushed by `applyContainerConfig`.
  *
  * OneCLI 1.23.x hardcodes `host.docker.internal:10255` in the
@@ -710,6 +720,16 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Spend guard — the exception to the container.json rule, deliberately.
+  // These are an operator-level safety limit on what an agent may spend, not
+  // a per-agent-group personality setting, so they belong to whoever runs the
+  // host rather than to anything an agent can edit about itself. Forwarded
+  // only when set; the runner's defaults apply otherwise.
+  for (const key of SPEND_GUARD_ENV_VARS) {
+    const value = process.env[key];
+    if (value !== undefined && value.trim() !== '') args.push('-e', `${key}=${value}`);
+  }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
