@@ -112,37 +112,34 @@ export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<R
     // unconditionally safe to execute immediately: it scopes to the calling
     // session, changes no config, and merely gives the container a fresh
     // token and clean start. No human confirmation needed.
-    const isSelfRestart =
-      req.command === 'groups-restart' &&
-      ctx.caller === 'agent' &&
-      !req.args.rebuild;
+    const isSelfRestart = req.command === 'groups-restart' && ctx.caller === 'agent' && !req.args.rebuild;
     if (!isSelfRestart) {
-    const session = getSession(ctx.sessionId);
-    if (!session) {
-      return err(req.id, 'handler-error', 'Session not found.');
-    }
-    const agentGroup = getAgentGroup(ctx.agentGroupId);
-    const agentName = agentGroup?.name ?? ctx.agentGroupId;
+      const session = getSession(ctx.sessionId);
+      if (!session) {
+        return err(req.id, 'handler-error', 'Session not found.');
+      }
+      const agentGroup = getAgentGroup(ctx.agentGroupId);
+      const agentName = agentGroup?.name ?? ctx.agentGroupId;
 
-    // Redact secret-bearing arg values from the human-facing approval message
-    // so credentials (e.g. --bot-token) never land in an approver's chat
-    // history — the exact "credential in chat context" leak this avoids
-    // elsewhere. The executable payload (payload.frame.args) keeps the real
-    // values; only this rendered summary is sanitized.
-    const argSummary = Object.entries(req.args)
-      .map(([k, v]) => `--${k} ${SENSITIVE_ARG_KEY.test(k) ? '<redacted>' : v}`)
-      .join(' ');
+      // Redact secret-bearing arg values from the human-facing approval message
+      // so credentials (e.g. --bot-token) never land in an approver's chat
+      // history — the exact "credential in chat context" leak this avoids
+      // elsewhere. The executable payload (payload.frame.args) keeps the real
+      // values; only this rendered summary is sanitized.
+      const argSummary = Object.entries(req.args)
+        .map(([k, v]) => `--${k} ${SENSITIVE_ARG_KEY.test(k) ? '<redacted>' : v}`)
+        .join(' ');
 
-    await requestApproval({
-      session,
-      agentName,
-      action: 'cli_command',
-      payload: { frame: { id: req.id, command: req.command, args: req.args } },
-      title: `CLI: ${req.command}`,
-      question: `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
-    });
+      await requestApproval({
+        session,
+        agentName,
+        action: 'cli_command',
+        payload: { frame: { id: req.id, command: req.command, args: req.args } },
+        title: `CLI: ${req.command}`,
+        question: `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
+      });
 
-    return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');
+      return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');
     } // end if (!isSelfRestart)
   }
 
