@@ -27,7 +27,9 @@ export interface ProviderOptions {
   additionalDirectories?: string[];
   /**
    * Model alias (`sonnet`, `opus`, `haiku`) or full model ID. Passed through
-   * to the underlying SDK. If omitted, the SDK default is used.
+   * to the underlying SDK. If omitted, the Claude provider pins to Sonnet
+   * (`DEFAULT_MODEL` in `providers/model-routing.ts`) rather than deferring
+   * to the SDK's own default.
    */
   model?: string;
   /**
