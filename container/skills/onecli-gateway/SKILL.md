@@ -3,10 +3,11 @@ name: onecli-gateway
 description: >-
   OneCLI Gateway: transparent HTTPS proxy that injects stored credentials
   into outbound calls. You MUST use this skill when the user asks you to
-  read emails, check calendar, access GitHub repos, create issues, check
-  Stripe payments, or interact with ANY external service or API. Do NOT
-  use browser extensions or OAuth CLI tools. Make HTTP requests directly;
-  the gateway injects credentials automatically.
+  read emails, check calendar, check Stripe payments, or interact with ANY
+  external service or API. Do NOT use browser extensions or OAuth CLI tools.
+  Make HTTP requests directly; the gateway injects credentials automatically.
+  (GitHub is the exception — it uses the injected $GH_TOKEN and bypasses the
+  proxy; see the GitHub section below.)
 compatibility: Requires HTTPS_PROXY set in environment (automatic when launched via `onecli run`)
 metadata:
   author: onecli
@@ -21,11 +22,13 @@ see or handle credential values directly.
 
 ## How to Access External Services
 
-You have direct HTTP access to external APIs. OAuth apps (Gmail, GitHub,
-Google Calendar, Google Drive, etc.) and API key services are all available
-through the gateway. Just make the request directly; the gateway injects
-credentials if the app is connected. If not, it returns an error with a
-connect URL you can present to the user.
+You have direct HTTP access to external APIs. OAuth apps (Gmail, Google
+Calendar, Google Drive, etc.) and API key services are all available through
+the gateway. Just make the request directly; the gateway injects credentials
+if the app is connected. If not, it returns an error with a connect URL you
+can present to the user.
+
+(GitHub does NOT work this way — see the GitHub section below.)
 
 ## Making Requests
 
@@ -34,13 +37,34 @@ credentials automatically.
 
 ```bash
 curl -s "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5"
-curl -s "https://api.github.com/user/repos?per_page=10"
 curl -s "https://api.stripe.com/v1/charges?limit=5"
 ```
 
 Standard HTTP clients (curl, fetch, requests, axios, Go net/http, git) all
 honor the `HTTPS_PROXY` environment variable automatically. You do not need
 to set any auth headers.
+
+## GitHub (does NOT go through the proxy)
+
+GitHub is **not** a proxy-brokered service here. If a GitHub App identity is
+bound to you, your access is a short-lived installation token injected as
+`$GH_TOKEN` (also `$GITHUB_TOKEN`), refreshed roughly hourly. GitHub hosts are
+excluded from the proxy, so you authenticate the request yourself:
+
+```bash
+# API — pass the token explicitly
+curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/installation/repositories"
+
+# git push / clone over HTTPS
+git push "https://x-access-token:$GH_TOKEN@github.com/<owner>/<repo>.git" <branch>
+```
+
+- **Never** tell the user GitHub "isn't connected" or hand them an OneCLI
+  `connect_url` for GitHub — that flow does not apply to GitHub.
+- A `401` means the token is mid-refresh (it rotates ~hourly). Wait and retry;
+  do not report it as lost access.
+- Never print, echo, or commit the token.
 
 ## Credential Stubs for MCP Servers
 
