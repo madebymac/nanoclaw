@@ -352,6 +352,54 @@ export function fixProxyGatewayPort(args: string[], onecliUrl: string): void {
   }
 }
 
+/**
+ * GitHub hosts the injected GitHub App token (`injectGithubAppToken`) acts
+ * against. The bot identity is authenticated by `$GH_TOKEN`, not by the OneCLI
+ * credential proxy — OneCLI can't broker a self-hosted GitHub App on its free
+ * plan, so it has no GitHub app-connection to inject.
+ */
+const GITHUB_PROXY_BYPASS_HOSTS = ['github.com', 'api.github.com', 'uploads.github.com', 'codeload.github.com'];
+
+/**
+ * Make GitHub traffic bypass the OneCLI proxy.
+ *
+ * Every container gets `HTTPS_PROXY` pointed at the OneCLI gateway
+ * (`applyContainerConfig`), so by default `git`/`curl` calls to GitHub route
+ * through a proxy that has no GitHub credential to inject. The proxy then
+ * interferes with the request and the agent wrongly concludes "GitHub isn't
+ * connected" — even though a fully-scoped `$GH_TOKEN` is sitting in its env.
+ * Adding the GitHub hosts to `NO_PROXY` sends those requests direct, so the
+ * injected token authenticates them and `--noproxy '*'` is no longer needed on
+ * every call.
+ *
+ * Merges into any `NO_PROXY`/`no_proxy` the provider or OneCLI already set, and
+ * must be called AFTER `applyContainerConfig` so the appended entries win
+ * docker's last-`-e`-wins ordering. Both casings are written because `curl` and
+ * `git` (via libcurl) read the lowercase form while many other clients read the
+ * uppercase one. Exported only for unit tests.
+ */
+export function bypassProxyForGithub(args: string[]): void {
+  let existing = '';
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] !== '-e') continue;
+    const next = args[i + 1];
+    const eq = next.indexOf('=');
+    if (eq < 0) continue;
+    const key = next.slice(0, eq);
+    if (key === 'NO_PROXY' || key === 'no_proxy') existing = next.slice(eq + 1);
+  }
+  const merged = Array.from(
+    new Set([
+      ...existing
+        .split(',')
+        .map((h) => h.trim())
+        .filter(Boolean),
+      ...GITHUB_PROXY_BYPASS_HOSTS,
+    ]),
+  ).join(',');
+  args.push('-e', `NO_PROXY=${merged}`, '-e', `no_proxy=${merged}`);
+}
+
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string; tokenMintedAt?: number }>();
 
@@ -779,6 +827,10 @@ async function buildContainerArgs(
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
   fixProxyGatewayPort(args, ONECLI_URL);
+  // Route GitHub direct (not through the OneCLI proxy) so the injected
+  // $GH_TOKEN authenticates git/curl calls. Must run after applyContainerConfig
+  // so it merges with — and overrides — any NO_PROXY the gateway set.
+  bypassProxyForGithub(args);
   log.info('OneCLI gateway applied', { containerName });
 
   // Host gateway

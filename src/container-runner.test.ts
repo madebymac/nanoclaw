@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  bypassProxyForGithub,
   fixProxyGatewayPort,
   GH_TOKEN_LIFETIME_MS,
   GH_TOKEN_REFRESH_THRESHOLD_MS,
@@ -108,6 +109,54 @@ describe('fixProxyGatewayPort', () => {
     const args = [...before];
     fixProxyGatewayPort(args, 'http://172.17.0.1:10354');
     expect(args).toEqual(before);
+  });
+});
+
+describe('bypassProxyForGithub', () => {
+  const hosts = 'github.com,api.github.com,uploads.github.com,codeload.github.com';
+
+  it('appends NO_PROXY + no_proxy for GitHub hosts when none is set', () => {
+    const args = ['-e', 'HTTPS_PROXY=http://host.docker.internal:10255'];
+    bypassProxyForGithub(args);
+    expect(args).toEqual([
+      '-e',
+      'HTTPS_PROXY=http://host.docker.internal:10255',
+      '-e',
+      `NO_PROXY=${hosts}`,
+      '-e',
+      `no_proxy=${hosts}`,
+    ]);
+  });
+
+  it('merges into an existing NO_PROXY without dropping its hosts', () => {
+    const args = ['-e', 'NO_PROXY=localhost,127.0.0.1'];
+    bypassProxyForGithub(args);
+    expect(args.slice(-4)).toEqual([
+      '-e',
+      `NO_PROXY=localhost,127.0.0.1,${hosts}`,
+      '-e',
+      `no_proxy=localhost,127.0.0.1,${hosts}`,
+    ]);
+  });
+
+  it('does not duplicate a GitHub host already present', () => {
+    const args = ['-e', 'no_proxy=github.com'];
+    bypassProxyForGithub(args);
+    // github.com kept once; the other three appended.
+    expect(args.slice(-4)).toEqual([
+      '-e',
+      'NO_PROXY=github.com,api.github.com,uploads.github.com,codeload.github.com',
+      '-e',
+      'no_proxy=github.com,api.github.com,uploads.github.com,codeload.github.com',
+    ]);
+  });
+
+  it('appends after existing proxy args so docker last-value-wins applies', () => {
+    // The gateway sets NO_PROXY first; our merged copy must come after it.
+    const args = ['-e', 'NO_PROXY=gateway.internal', '-e', 'HTTPS_PROXY=http://host:10255'];
+    bypassProxyForGithub(args);
+    const lastNoProxy = args.lastIndexOf('-e');
+    expect(args[lastNoProxy + 1]).toBe(`no_proxy=gateway.internal,${hosts}`);
   });
 });
 
