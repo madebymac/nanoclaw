@@ -9,6 +9,15 @@ export const AUTO_ROUTE_SIMPLE_MODEL = AUTO_ROUTE_HAIKU;
 export const AUTO_ROUTE_COMPLEX_MODEL = AUTO_ROUTE_SONNET;
 
 /**
+ * Model used whenever a group's container config leaves `model` unset. Pinned
+ * explicitly rather than passing `undefined` through to the SDK, which would
+ * otherwise fall back to whatever the underlying Claude Code CLI defaults to
+ * — a value that can drift (e.g. a CLI-level settings.json pinning Opus)
+ * independent of anything nanoclaw controls.
+ */
+export const DEFAULT_MODEL = AUTO_ROUTE_SONNET;
+
+/**
  * Strip the XML envelope that formatter.ts wraps around inbound messages
  * (`<context/>`, `<messages>`, `<message …>`, `<task>`, `<quoted_message>`)
  * and unescape entities, so routing measures the actual message content.

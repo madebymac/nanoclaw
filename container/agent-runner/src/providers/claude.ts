@@ -6,7 +6,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { getSpendLimits } from '../spend-guard.js';
 import { registerProvider } from './provider-registry.js';
-import { resolveAutoModel } from './model-routing.js';
+import { DEFAULT_MODEL, resolveAutoModel } from './model-routing.js';
 export { resolveAutoModel } from './model-routing.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -297,7 +297,7 @@ export class ClaudeProvider implements AgentProvider {
     stream.push(input.prompt);
 
     const instructions = input.systemContext?.instructions;
-    const model = this.model === 'auto' ? resolveAutoModel(input.prompt) : this.model;
+    const model = this.model === 'auto' ? resolveAutoModel(input.prompt) : (this.model ?? DEFAULT_MODEL);
     if (this.model === 'auto') log(`Auto-routed to ${model}`);
     // Per-turn ceiling: the SDK stops the query itself and returns an
     // `error_max_budget_usd` result rather than letting one turn run away.
