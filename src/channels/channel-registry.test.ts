@@ -199,6 +199,61 @@ describe('channel registry', () => {
     expect(getChannelAdapter('telegram#flaky')).toBeUndefined();
   });
 
+  it('watchdog recovers an adapter whose startup NetworkError retries were exhausted', async () => {
+    vi.useFakeTimers();
+    try {
+      const {
+        registerChannelAdapter,
+        initChannelAdapters,
+        getChannelAdapter,
+        startChannelAdapterWatchdog,
+        stopChannelAdapterWatchdog,
+      } = await import('./channel-registry.js');
+
+      let callCount = 0;
+      const adapter = createMockAdapter('telegram#flaky-boot');
+      adapter.setup = vi.fn(async () => {
+        callCount += 1;
+        // Fails on every call startOneAdapter makes during startup (1 initial
+        // + 3 retries = 4), then recovers — simulating an outage that outlasts
+        // the bounded startup retry budget but has since cleared.
+        if (callCount <= 4) {
+          const err = new Error('still down');
+          err.name = 'NetworkError';
+          throw err;
+        }
+      });
+
+      registerChannelAdapter('telegram-flaky-boot', { factory: () => adapter });
+
+      const initPromise = initChannelAdapters(() => ({
+        conversations: [],
+        onInbound: () => {},
+        onInboundEvent: () => {},
+        onMetadata: () => {},
+        onAction: () => {},
+      }));
+      await vi.runAllTimersAsync();
+      await initPromise;
+
+      // Startup gave up after exhausting its bounded retry budget — not active.
+      expect(getChannelAdapter('telegram#flaky-boot')).toBeUndefined();
+      expect(callCount).toBe(4);
+
+      // The watchdog gets a long-running second chance and should pick it up
+      // on its very first tick, now that the simulated outage has cleared.
+      startChannelAdapterWatchdog();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(getChannelAdapter('telegram#flaky-boot')).toBeDefined();
+      expect(callCount).toBe(5);
+
+      stopChannelAdapterWatchdog();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('should skip adapters that return null (missing credentials)', async () => {
     const { registerChannelAdapter, initChannelAdapters, getActiveAdapters } = await import('./channel-registry.js');
 

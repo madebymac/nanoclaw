@@ -69,7 +69,13 @@ import { startCliServer, stopCliServer } from './cli/socket-server.js';
 import { rehydrateOneCLICredentials } from './container-runner.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
-import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
+import {
+  initChannelAdapters,
+  teardownChannelAdapters,
+  getChannelAdapter,
+  startChannelAdapterWatchdog,
+  stopChannelAdapterWatchdog,
+} from './channels/channel-registry.js';
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
@@ -189,6 +195,11 @@ async function main(): Promise<void> {
   startHostSweep();
   log.info('Host sweep started');
 
+  // 6a. Start the channel adapter watchdog — background recovery for any
+  // adapter that failed to start due to a network error (e.g. boot during a
+  // wifi outage) that outlasted its bounded startup retry budget.
+  startChannelAdapterWatchdog();
+
   // 6b. Start self-upgrade poller.
   startSelfUpgrade();
 
@@ -228,6 +239,7 @@ async function shutdown(signal: string): Promise<void> {
   }
   stopDeliveryPolls();
   stopHostSweep();
+  stopChannelAdapterWatchdog();
   stopSelfUpgrade();
   await stopCliServer();
   try {
