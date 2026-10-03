@@ -21,6 +21,15 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const registry = new Map<string, ChannelRegistration>();
 const activeAdapters = new Map<string, ChannelAdapter>();
 
+// Adapters whose startup setup exhausted startOneAdapter's bounded NetworkError
+// retry budget (a few seconds — fine for a DNS hiccup, too short for the host
+// rebooting into a wifi network that takes minutes to re-associate). The
+// watchdog below gives these a long-running second chance instead of leaving
+// the channel permanently dead until a manual restart. Keyed by channelType.
+const pendingRetries = new Map<string, { name: string; adapter: ChannelAdapter }>();
+const WATCHDOG_INTERVAL_MS = 30_000;
+let watchdogRunning = false;
+
 // Captured from initChannelAdapters so live (restart-free) adds can set up a
 // new adapter with the same host wiring (onInbound/onAction/etc.) the
 // startup-time adapters got. Null until the host has initialized channels.
@@ -126,9 +135,64 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
         await startOneAdapter(name, adapter, setupFn);
       } catch (err) {
         log.error('Failed to start channel adapter', { channel: name, type: adapter.channelType, err });
+        // Only hand network failures to the watchdog — a bad token or other
+        // misconfig won't fix itself by retrying and should stay a one-time,
+        // fail-fast error (see startOneAdapter's retryNetworkErrors comment).
+        if (isNetworkError(err)) {
+          pendingRetries.set(adapter.channelType, { name, adapter });
+          log.warn('Channel adapter handed to startup watchdog for background retry', {
+            channel: name,
+            type: adapter.channelType,
+          });
+        }
       }
     }
   }
+}
+
+/**
+ * Background recovery for adapters in `pendingRetries`. Started once at host
+ * boot alongside the other periodic tasks (host sweep, delivery polls) and
+ * runs for the lifetime of the process — an outage that outlasts
+ * startOneAdapter's ~17s budget (e.g. a multi-minute wifi reconnect) no
+ * longer leaves a channel dead until someone notices and restarts the host.
+ */
+export function startChannelAdapterWatchdog(): void {
+  if (watchdogRunning) return;
+  watchdogRunning = true;
+  void watchdogTick();
+}
+
+export function stopChannelAdapterWatchdog(): void {
+  watchdogRunning = false;
+}
+
+async function watchdogTick(): Promise<void> {
+  if (!watchdogRunning) return;
+
+  if (pendingRetries.size > 0 && hostSetupFn) {
+    for (const [channelType, { name, adapter }] of [...pendingRetries]) {
+      try {
+        await startOneAdapter(name, adapter, hostSetupFn);
+        pendingRetries.delete(channelType);
+        log.info('Channel adapter recovered by watchdog', { channel: name, type: channelType });
+      } catch (err) {
+        if (!isNetworkError(err)) {
+          // Stopped being a network problem (e.g. token revoked mid-outage).
+          // Surface it once and stop retrying forever in the background.
+          pendingRetries.delete(channelType);
+          log.error('Channel adapter watchdog retry abandoned — non-network error', {
+            channel: name,
+            type: channelType,
+            err,
+          });
+        }
+        // Still a NetworkError — leave it queued for the next tick.
+      }
+    }
+  }
+
+  setTimeout(watchdogTick, WATCHDOG_INTERVAL_MS);
 }
 
 /**
