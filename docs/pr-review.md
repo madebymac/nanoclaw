@@ -112,6 +112,15 @@ cooldown elapses.
   the bot account (`<app-slug>[bot]`). Once the bot has reviewed (or commented),
   the PR is never re-triggered — matching the "PRs that have not yet had any
   comments by the review bot" rule.
+- **Bot-authored PRs:** a PR whose author is a bot account (`user.type ==
+  "Bot"` or a `[bot]` login), or whose description carries a Claude Code
+  footer (`Generated with [Claude Code]` / a `claude.ai/code/session_` link —
+  Claude Code opens PRs under the human's account), is flagged in the review
+  prompt. The reviewer is told the author has no physical device, so it must
+  not ask for on-device screenshots or manual testing evidence, nor block on
+  their absence; it judges automated tests / CI instead and leaves any real
+  device check as a non-blocking note for the human maintainer
+  (`isBotAuthored` in `scan.ts`).
 - **No duplicate nagging:** a dispatched PR is recorded in `pr_review_dispatch`
   (central DB, migration 017). It won't be re-instructed until the cooldown
   elapses (covers an agent run that errored before posting a review) or new

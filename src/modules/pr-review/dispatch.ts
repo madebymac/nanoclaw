@@ -28,6 +28,8 @@ export interface PullToReview {
   title: string;
   author: string;
   htmlUrl: string;
+  /** Raised by a bot / coding agent — it has no physical device to test on. */
+  authoredByBot?: boolean;
 }
 
 function buildPrompt(pr: PullToReview, replyInChat: boolean): string {
@@ -45,6 +47,20 @@ function buildPrompt(pr: PullToReview, replyInChat: boolean): string {
     `  REQUEST_CHANGES (or COMMENT) with your findings.`,
     ``,
   ];
+  if (pr.authoredByBot) {
+    lines.push(
+      `This PR was raised by a bot / coding agent, not a person. It has no access to a`,
+      `phone, simulator or any physical device, so it cannot produce on-device`,
+      `screenshots, screen recordings or manual testing evidence:`,
+      `- Do NOT ask for any of these, and do NOT withhold approval or REQUEST_CHANGES`,
+      `  because they are missing.`,
+      `- Judge testing from what an agent can produce: automated tests, CI results,`,
+      `  build output, and the code itself. Ask for missing automated tests instead.`,
+      `- If you believe a change genuinely needs a check on a real device, say so once`,
+      `  as a non-blocking note addressed to the human maintainer who will merge it.`,
+      ``,
+    );
+  }
   if (replyInChat) {
     lines.push(
       `When you're done, post a single chat message announcing completion with:`,

@@ -27,7 +27,7 @@ import { log } from '../../log.js';
 import { getDispatch, recordDispatch } from './db.js';
 import { dispatchReview } from './dispatch.js';
 import { botHasTouchedPull, listInstallationRepos, listOpenPulls } from './github.js';
-import { shouldDispatch } from './scan.js';
+import { isBotAuthored, shouldDispatch } from './scan.js';
 
 const FETCH_TIMEOUT_MS = 10_000;
 
@@ -148,6 +148,7 @@ async function scanAndDispatch(agentGroupId: string): Promise<number> {
             title: pr.title,
             author: pr.author,
             htmlUrl: pr.htmlUrl,
+            authoredByBot: isBotAuthored({ login: pr.author, userType: pr.authorType, body: pr.body }),
           },
           PR_REVIEW_STATUS_MESSAGING_GROUP_ID,
         );

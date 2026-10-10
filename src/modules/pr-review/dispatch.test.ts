@@ -108,7 +108,32 @@ describe('dispatchReview', () => {
     expect(content.prompt).toContain('acme/widgets');
     expect(content.prompt).toContain('#42');
     expect(content.prompt).toContain('https://github.com/acme/widgets/pull/42');
+    expect(content.prompt).not.toContain('raised by a bot');
     expect(wakeContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells the reviewer not to demand on-device evidence from a bot-authored PR', async () => {
+    createAgentGroup({
+      id: AGENT,
+      name: 'review',
+      folder: 'review',
+      agent_provider: null,
+      created_at: new Date().toISOString(),
+    });
+
+    await dispatchReview(AGENT, {
+      fullName: 'acme/widgets',
+      number: 43,
+      title: 'Agent change',
+      author: 'claude[bot]',
+      htmlUrl: 'https://github.com/acme/widgets/pull/43',
+      authoredByBot: true,
+    });
+
+    const session = findSessionByAgentGroup(AGENT);
+    const content = JSON.parse(readInbound(AGENT, session!.id)[0].content);
+    expect(content.prompt).toContain('raised by a bot');
+    expect(content.prompt).toContain('on-device');
   });
 
   it('with a status messaging group: posts a "review requested" notice and anchors a shared session', async () => {

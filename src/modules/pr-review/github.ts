@@ -22,6 +22,9 @@ export interface OpenPull {
   headSha: string | null;
   htmlUrl: string;
   author: string;
+  /** `user.type` — 'Bot' for GitHub App / bot accounts. */
+  authorType: string | null;
+  body: string | null;
 }
 
 async function ghFetch(
@@ -117,7 +120,8 @@ export async function listOpenPulls(
       draft?: boolean;
       head?: { sha?: string };
       html_url?: string;
-      user?: { login?: string };
+      body?: string | null;
+      user?: { login?: string; type?: string };
     };
     return {
       number: pr.number,
@@ -126,6 +130,8 @@ export async function listOpenPulls(
       headSha: pr.head?.sha ?? null,
       htmlUrl: pr.html_url ?? '',
       author: pr.user?.login ?? 'unknown',
+      authorType: pr.user?.type ?? null,
+      body: pr.body ?? null,
     };
   });
 }

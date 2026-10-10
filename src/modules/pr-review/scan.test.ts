@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PrReviewDispatch } from './db.js';
-import { shouldDispatch } from './scan.js';
+import { isBotAuthored, shouldDispatch } from './scan.js';
 
 const NOW = Date.parse('2026-06-02T12:00:00.000Z');
 const COOLDOWN = 30 * 60_000; // 30 min
@@ -100,5 +100,33 @@ describe('shouldDispatch', () => {
         cooldownMs: COOLDOWN,
       }),
     ).toBe(true);
+  });
+});
+
+describe('isBotAuthored', () => {
+  it('flags GitHub App / bot accounts by user type', () => {
+    expect(isBotAuthored({ login: 'renovate', userType: 'Bot', body: null })).toBe(true);
+  });
+
+  it('flags [bot] logins', () => {
+    expect(isBotAuthored({ login: 'claude[bot]', userType: null, body: null })).toBe(true);
+  });
+
+  it('flags agent PRs opened under a human account via the description footer', () => {
+    expect(
+      isBotAuthored({
+        login: 'octocat',
+        userType: 'User',
+        body: 'Fixes the thing.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)',
+      }),
+    ).toBe(true);
+    expect(isBotAuthored({ login: 'octocat', userType: 'User', body: 'https://claude.ai/code/session_01ABC' })).toBe(
+      true,
+    );
+  });
+
+  it('does not flag a human-written PR', () => {
+    expect(isBotAuthored({ login: 'octocat', userType: 'User', body: 'Tested on my iPhone.' })).toBe(false);
+    expect(isBotAuthored({ login: 'octocat', userType: 'User', body: null })).toBe(false);
   });
 });
