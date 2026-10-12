@@ -55,14 +55,40 @@ describe('listOpenPulls', () => {
   it('maps PR fields including draft + head sha', async () => {
     route({
       '/repos/acme/widgets/pulls': [
-        { number: 5, title: 'Feature', draft: false, head: { sha: 'abc' }, html_url: 'u5', user: { login: 'octocat' } },
+        {
+          number: 5,
+          title: 'Feature',
+          draft: false,
+          head: { sha: 'abc' },
+          html_url: 'u5',
+          body: 'desc',
+          user: { login: 'octocat', type: 'User' },
+        },
         { number: 6, title: 'WIP', draft: true, head: { sha: 'def' }, html_url: 'u6', user: { login: 'dev' } },
       ],
     });
     const pulls = await listOpenPulls(TOKEN, API, 'acme', 'widgets', TIMEOUT);
     expect(pulls).toEqual([
-      { number: 5, title: 'Feature', draft: false, headSha: 'abc', htmlUrl: 'u5', author: 'octocat' },
-      { number: 6, title: 'WIP', draft: true, headSha: 'def', htmlUrl: 'u6', author: 'dev' },
+      {
+        number: 5,
+        title: 'Feature',
+        draft: false,
+        headSha: 'abc',
+        htmlUrl: 'u5',
+        author: 'octocat',
+        authorType: 'User',
+        body: 'desc',
+      },
+      {
+        number: 6,
+        title: 'WIP',
+        draft: true,
+        headSha: 'def',
+        htmlUrl: 'u6',
+        author: 'dev',
+        authorType: null,
+        body: null,
+      },
     ]);
   });
 });
