@@ -45,6 +45,10 @@ services:
   onecli:
     image: ghcr.io/onecli/onecli:${ONECLI_VERSION:-latest}
     restart: unless-stopped
+    # Lets the gateway reach services on the host (e.g. an MCP server on the
+    # Docker bridge) when injecting credentials for host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
