@@ -54,7 +54,6 @@ The flip-side: the cadence now lives in your crontab, not in env vars. No
    PR_REVIEW_AGENT_GROUP_ID=<reviewer agent group id>
    # optional:
    PR_REVIEW_COOLDOWN_MS=1800000               # re-dispatch window if no review lands (floored at 60000)
-   PR_REVIEW_STATUS_MESSAGING_GROUP_ID=<id>    # see "Status updates" below
    ```
    Restart the host so it picks up the new env vars.
 
@@ -76,33 +75,6 @@ You can also run a tick by hand for diagnosis:
 ncl pr-review run
 # → {"status":"ran","dispatched":2}
 ```
-
-## Status updates (optional)
-
-By default the reviewer agent stays silent — it leaves inline comments on the
-PR and that's it. If you set `PR_REVIEW_STATUS_MESSAGING_GROUP_ID` to the id
-of a `messaging_group` (e.g. a Telegram group chat the review bot is in),
-each dispatch produces two updates in that chat:
-
-1. **Review requested** — posted by the host the instant a PR is handed off,
-   before the container even wakes (so you see the ping in real time):
-   `Review requested: acme/widgets#42 / Title: ... / Author: @octocat / <url>`.
-2. **Review complete** — the agent's own reply once it has submitted its
-   review, with the verdict (`APPROVED` / `CHANGES_REQUESTED` / `COMMENTED`),
-   the PR link, and a one-paragraph summary.
-
-To make (2) work, dispatch resolves the reviewer's session against the
-configured messaging group in `shared` mode, so the bot's natural chat reply
-flows back to the same chat. Without the env var, the original silent
-`agent-shared` behaviour is preserved.
-
-**Best-effort.** The completion message relies on the agent following the
-chat-reply instruction in its prompt. If the agent run is interrupted (the
-container is killed mid-review, the GitHub token expires, an unhandled
-error trips it) you will see the "review requested" ping but no
-completion notice. The PR-review cooldown (`PR_REVIEW_COOLDOWN_MS`) still
-applies, so the same PR will be re-dispatched on the next scan after the
-cooldown elapses.
 
 ## Scope and behaviour
 
@@ -130,8 +102,9 @@ cooldown elapses.
   invocation returns `{status: "busy"}` and exits. No two ticks ever run at
   once.
 - **Where the instruction lands:** the reviewer agent's session, as a `task`
-  message (the same shape a user-scheduled task uses). Session resolution
-  depends on `PR_REVIEW_STATUS_MESSAGING_GROUP_ID` — see "Status updates" above.
+  message (the same shape a user-scheduled task uses), in its `agent-shared`
+  session. The host posts no chat status of its own; any start/finish
+  notification comes from the agent (see `config-examples/pr-reviewer/`).
 
 ## Key files
 
@@ -141,6 +114,6 @@ cooldown elapses.
 | `src/cli/resources/pr-review.ts` | Registers `pr-review run` so cron can call into the host via `ncl` |
 | `src/modules/pr-review/github.ts` | Read-only GitHub REST helpers (repos, open PRs, bot-touched check) |
 | `src/modules/pr-review/scan.ts` | Pure `shouldDispatch` decision (unit-tested, no I/O) |
-| `src/modules/pr-review/dispatch.ts` | Injects the review `task`, optionally posts the status, wakes the container |
+| `src/modules/pr-review/dispatch.ts` | Injects the review `task`, wakes the container |
 | `src/modules/pr-review/db.ts` | `pr_review_dispatch` tracking (dedupe) |
 | `src/github-app-broker.ts` | `mintInstallationToken` + `fetchAppLogin` (bot login) |

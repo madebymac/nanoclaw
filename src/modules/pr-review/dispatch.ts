@@ -4,20 +4,8 @@
  * user-scheduled task fires (kind='task' with a `prompt`) — the agent reads
  * the instruction and performs the review with its own GitHub access. The
  * host does NOT review; it only delegates.
- *
- * Status updates (when PR_REVIEW_STATUS_MESSAGING_GROUP_ID is set):
- *   1. "Review requested" — posted host-side via the channel adapter at
- *      dispatch time, so the operator sees a ping even before the container
- *      wakes.
- *   2. "Review complete" — the agent posts this itself as its natural reply.
- *      To make that work, the session is anchored to the configured messaging
- *      group ('shared' mode) so the bot's reply flows back to the group chat
- *      instead of disappearing into an agent-shared session with no
- *      destination.
  */
-import { getChannelAdapter } from '../../channels/channel-registry.js';
 import { wakeContainer } from '../../container-runner.js';
-import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { resolveSession, writeSessionMessage } from '../../session-manager.js';
@@ -32,7 +20,7 @@ export interface PullToReview {
   authoredByBot?: boolean;
 }
 
-function buildPrompt(pr: PullToReview, replyInChat: boolean): string {
+function buildPrompt(pr: PullToReview): string {
   const lines = [
     `A pull request needs review.`,
     ``,
@@ -61,73 +49,19 @@ function buildPrompt(pr: PullToReview, replyInChat: boolean): string {
       ``,
     );
   }
-  if (replyInChat) {
-    lines.push(
-      `When you're done, post a single chat message announcing completion with:`,
-      `  - the verdict (APPROVED / CHANGES_REQUESTED / COMMENTED),`,
-      `  - the PR (${pr.fullName}#${pr.number}) and a link,`,
-      `  - a one-paragraph summary of the main findings (or "no issues found").`,
-      `This is the only chat reply you should send; everything else belongs as`,
-      `inline review comments on the PR itself.`,
-    );
-  } else {
-    lines.push(
-      `This is an automated request from the periodic PR-review job. You don't need`,
-      `to reply in chat unless something needs the owner's attention.`,
-    );
-  }
+  lines.push(
+    `This is an automated request from the periodic PR-review job. You don't need`,
+    `to reply in chat unless something needs the owner's attention.`,
+  );
   return lines.join('\n');
 }
 
-function buildRequestedStatus(pr: PullToReview): string {
-  return [
-    `Review requested: ${pr.fullName}#${pr.number}`,
-    `Title: ${pr.title}`,
-    `Author: @${pr.author}`,
-    pr.htmlUrl,
-  ].join('\n');
-}
-
 /**
- * Resolve a session for the reviewer agent, inject the review task, and wake.
- * When `statusMessagingGroupId` is supplied, also post a "review requested"
- * status message to that chat and anchor the session there so the agent's
- * completion reply flows back as the "review complete" status. Without it,
- * uses agent-shared resolution and the silent prompt (original behaviour).
+ * Resolve the reviewer agent's shared session, inject the review task, and
+ * wake. Status updates are the agent's own business — the host posts nothing.
  */
-export async function dispatchReview(
-  agentGroupId: string,
-  pr: PullToReview,
-  statusMessagingGroupId?: string | null,
-): Promise<void> {
-  const statusMg = statusMessagingGroupId ? getMessagingGroup(statusMessagingGroupId) : undefined;
-  if (statusMessagingGroupId && !statusMg) {
-    log.warn(
-      'pr-review: PR_REVIEW_STATUS_MESSAGING_GROUP_ID does not match any messaging_group — falling back to agent-shared silent dispatch',
-      {
-        statusMessagingGroupId,
-      },
-    );
-  }
-
-  // Resolve the adapter up-front: if it's missing, the agent's completion
-  // reply would be written to a session bound to an unreachable chat and
-  // silently dropped. Treat that the same as a missing messaging group and
-  // fall all the way back to silent agent-shared dispatch.
-  const adapter = statusMg ? getChannelAdapter(statusMg.channel_type) : undefined;
-  if (statusMg && !adapter) {
-    log.warn(
-      'pr-review: no live channel adapter for status messaging group — falling back to agent-shared silent dispatch',
-      {
-        channelType: statusMg.channel_type,
-      },
-    );
-  }
-  const effectiveStatusMg = statusMg && adapter ? statusMg : undefined;
-
-  const { session } = effectiveStatusMg
-    ? resolveSession(agentGroupId, effectiveStatusMg.id, null, 'shared')
-    : resolveSession(agentGroupId, null, null, 'agent-shared');
+export async function dispatchReview(agentGroupId: string, pr: PullToReview): Promise<void> {
+  const { session } = resolveSession(agentGroupId, null, null, 'agent-shared');
 
   const id = `prr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   writeSessionMessage(agentGroupId, session.id, {
@@ -137,7 +71,7 @@ export async function dispatchReview(
     platformId: null,
     channelType: null,
     threadId: null,
-    content: JSON.stringify({ prompt: buildPrompt(pr, Boolean(effectiveStatusMg)), source: 'pr-review-cron' }),
+    content: JSON.stringify({ prompt: buildPrompt(pr), source: 'pr-review-cron' }),
     trigger: 1,
   });
 
@@ -147,19 +81,7 @@ export async function dispatchReview(
     repo: pr.fullName,
     pr: pr.number,
     taskId: id,
-    statusMessagingGroupId: effectiveStatusMg?.id ?? null,
   });
-
-  if (effectiveStatusMg) {
-    try {
-      await adapter!.deliver(effectiveStatusMg.platform_id, null, {
-        kind: 'chat',
-        content: { text: buildRequestedStatus(pr) },
-      });
-    } catch (err) {
-      log.error('pr-review: failed to post requested-status', { err, repo: pr.fullName, pr: pr.number });
-    }
-  }
 
   const fresh = getSession(session.id);
   if (fresh) await wakeContainer(fresh);

@@ -15,12 +15,7 @@
  * session-DB writes still come from the single host writer. Opt-in via
  * PR_REVIEW_ENABLED.
  */
-import {
-  PR_REVIEW_AGENT_GROUP_ID,
-  PR_REVIEW_COOLDOWN_MS,
-  PR_REVIEW_ENABLED,
-  PR_REVIEW_STATUS_MESSAGING_GROUP_ID,
-} from '../../config.js';
+import { PR_REVIEW_AGENT_GROUP_ID, PR_REVIEW_COOLDOWN_MS, PR_REVIEW_ENABLED } from '../../config.js';
 import { getGithubAppForAgentGroup } from '../../db/github-apps.js';
 import { fetchAppLogin, mintInstallationToken, type GithubAppCredentials } from '../../github-app-broker.js';
 import { log } from '../../log.js';
@@ -140,18 +135,14 @@ async function scanAndDispatch(agentGroupId: string): Promise<number> {
       }
 
       try {
-        await dispatchReview(
-          agentGroupId,
-          {
-            fullName: r.fullName,
-            number: pr.number,
-            title: pr.title,
-            author: pr.author,
-            htmlUrl: pr.htmlUrl,
-            authoredByBot: isBotAuthored({ login: pr.author, userType: pr.authorType, body: pr.body }),
-          },
-          PR_REVIEW_STATUS_MESSAGING_GROUP_ID,
-        );
+        await dispatchReview(agentGroupId, {
+          fullName: r.fullName,
+          number: pr.number,
+          title: pr.title,
+          author: pr.author,
+          htmlUrl: pr.htmlUrl,
+          authoredByBot: isBotAuthored({ login: pr.author, userType: pr.authorType, body: pr.body }),
+        });
         recordDispatch(r.fullName, pr.number, pr.headSha, new Date().toISOString());
         dispatched++;
       } catch (err) {

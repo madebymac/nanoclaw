@@ -26,7 +26,6 @@ const envConfig = readEnvFile(
     'PR_REVIEW_ENABLED',
     'PR_REVIEW_AGENT_GROUP_ID',
     'PR_REVIEW_COOLDOWN_MS',
-    'PR_REVIEW_STATUS_MESSAGING_GROUP_ID',
   ],
   ENV_FILE_PATH,
 );
@@ -85,14 +84,6 @@ export const PR_REVIEW_COOLDOWN_MS = Math.max(
   60_000,
   parseInt(process.env.PR_REVIEW_COOLDOWN_MS || envConfig.PR_REVIEW_COOLDOWN_MS || '1800000', 10) || 1_800_000,
 );
-// Messaging-group id where the review bot announces "review requested" and
-// "review complete" status updates. When set, dispatches are anchored to a
-// session bound to this group so the agent's reply flows back as the
-// completion update; when unset, dispatch falls back to the silent
-// agent-shared session (original behaviour). Typically the operator's
-// shared agents chat (e.g. a Telegram group with the review bot).
-export const PR_REVIEW_STATUS_MESSAGING_GROUP_ID =
-  process.env.PR_REVIEW_STATUS_MESSAGING_GROUP_ID || envConfig.PR_REVIEW_STATUS_MESSAGING_GROUP_ID || null;
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
