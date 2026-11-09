@@ -67,7 +67,15 @@ describe('matty channel', () => {
 
   it('ignores junk and empty messages', async () => {
     const c = await connect();
-    c.write('not json\n' + JSON.stringify({ text: '' }) + '\n' + JSON.stringify({ nope: 1 }) + '\n' + JSON.stringify({ text: 'ok' }) + '\n');
+    c.write(
+      'not json\n' +
+        JSON.stringify({ text: '' }) +
+        '\n' +
+        JSON.stringify({ nope: 1 }) +
+        '\n' +
+        JSON.stringify({ text: 'ok' }) +
+        '\n',
+    );
     await until(() => inbound.length > 0);
     expect(inbound).toHaveLength(1);
     c.destroy();
