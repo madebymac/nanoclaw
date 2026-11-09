@@ -119,10 +119,48 @@ async function injectGithubAppToken(args: string[], agentGroupId: string): Promi
  * non-interactive bash subshell, so subsequent git/gh/curl calls pick up the
  * new token without a container restart. See #66.
  */
+/**
+ * The `--user` spec the agent container runs as, or undefined when it runs as
+ * the image's default user (`node`, uid 1000). Host uids 0 and 1000 keep the
+ * default; anything else (e.g. 501 on macOS) maps the host uid:gid in so
+ * bind-mounted files stay writable on both sides.
+ */
+export function containerUserSpec(
+  hostUid: number | undefined = process.getuid?.(),
+  hostGid: number | undefined = process.getgid?.(),
+): string | undefined {
+  if (hostUid == null || hostUid === 0 || hostUid === 1000) return undefined;
+  return `${hostUid}:${hostGid}`;
+}
+
+/**
+ * Args for `docker exec` into an agent container.
+ *
+ * `docker exec` does NOT inherit the `--user` the container was started with —
+ * it runs as the image's default user (`node`). When the container runs as a
+ * mapped host uid (macOS: 501), an exec without `-u` writes files the agent
+ * can't read (and can't overwrite files the agent owns). For the GitHub token
+ * refresh that meant /tmp/.gh-token ended up owned by uid 1000 with mode 600,
+ * the BASH_ENV hook's read silently failed, and the agent saw an empty
+ * $GH_TOKEN after every failed spawn-time mint or hourly refresh. Always exec
+ * as the same user the container runs as. Exported only for unit tests.
+ */
+export function buildExecArgs(containerName: string, shellCmd: string, user = containerUserSpec()): string[] {
+  return ['exec', '-i', ...(user ? ['-u', user] : []), containerName, 'sh', '-c', shellCmd];
+}
+
+/**
+ * Shell run inside the container to install a refreshed token. Written to a
+ * temp file then renamed so a concurrent BASH_ENV read never sees a partial
+ * token. Exported only for unit tests.
+ */
+export const GH_TOKEN_WRITE_CMD =
+  'umask 077 && cat > /tmp/.gh-token.new && chmod 600 /tmp/.gh-token.new && mv -f /tmp/.gh-token.new /tmp/.gh-token';
+
 /** Write `input` to a container via docker exec, returns a promise (non-blocking). */
 function dockerExecWrite(containerName: string, shellCmd: string, input: string, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(CONTAINER_RUNTIME_BIN, ['exec', '-i', containerName, 'sh', '-c', shellCmd]);
+    const child = spawn(CONTAINER_RUNTIME_BIN, buildExecArgs(containerName, shellCmd));
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error(`docker exec timed out after ${timeoutMs}ms`));
@@ -179,7 +217,7 @@ async function refreshGithubTokenInContainer(
       return;
     }
 
-    await dockerExecWrite(entry.containerName, 'cat > /tmp/.gh-token && chmod 600 /tmp/.gh-token', token, 5_000);
+    await dockerExecWrite(entry.containerName, GH_TOKEN_WRITE_CMD, token, 5_000);
     entry.tokenMintedAt = Date.now();
     log.info('GitHub App token refreshed in container', { agentGroupId, containerName: entry.containerName });
   } catch (err) {
@@ -837,10 +875,10 @@ async function buildContainerArgs(
   args.push(...hostGatewayArgs());
 
   // User mapping
-  const hostUid = process.getuid?.();
-  const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
-    args.push('--user', `${hostUid}:${hostGid}`);
+  // Keep in sync with buildExecArgs — token refresh execs as this same user.
+  const userSpec = containerUserSpec();
+  if (userSpec) {
+    args.push('--user', userSpec);
     args.push('-e', 'HOME=/home/node');
   }
 

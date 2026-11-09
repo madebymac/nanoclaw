@@ -40,6 +40,7 @@ GIT_SSL_NO_VERIFY=1 git push https://x-access-token:$GH_TOKEN@github.com/madebym
 
 ### Rules
 
+- If `$GH_TOKEN` is empty, the host failed to mint or deliver it. That's a host-side failure, not OneCLI, and a restart won't reliably fix it. Say so once, and point the user to the host log (`GitHub App token` lines). Don't loop on retries or keep asking for restarts.
 - Never print, log, or commit `$GH_TOKEN`.
-- If you get a 401, the token is between refresh cycles — wait and retry.
+- If you get a 401 with a non-empty token, it may be between refresh cycles. Wait a minute and retry once.
 - All repos are under the `madebymac` org.

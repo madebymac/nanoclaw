@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  buildExecArgs,
   bypassProxyForGithub,
+  containerUserSpec,
   fixProxyGatewayPort,
   GH_TOKEN_LIFETIME_MS,
   GH_TOKEN_REFRESH_THRESHOLD_MS,
+  GH_TOKEN_WRITE_CMD,
   maybeRefreshGithubToken,
   resolveProviderName,
 } from './container-runner.js';
@@ -184,5 +187,30 @@ describe('maybeRefreshGithubToken', () => {
   it('is callable from the host-sweep import path (smoke test)', () => {
     // Verify the function is exported and importable so the sweep can call it.
     expect(typeof maybeRefreshGithubToken).toBe('function');
+  });
+});
+
+describe('container user / exec user parity', () => {
+  it('keeps the image default user for host uid 0 and 1000', () => {
+    expect(containerUserSpec(0, 0)).toBeUndefined();
+    expect(containerUserSpec(1000, 1000)).toBeUndefined();
+    expect(containerUserSpec(undefined, undefined)).toBeUndefined();
+  });
+
+  it('maps other host uids (e.g. macOS 501)', () => {
+    expect(containerUserSpec(501, 20)).toBe('501:20');
+  });
+
+  it('execs as the container user so refreshed token files are readable by the agent', () => {
+    expect(buildExecArgs('c1', 'true', '501:20')).toEqual(['exec', '-i', '-u', '501:20', 'c1', 'sh', '-c', 'true']);
+  });
+
+  it('omits -u when the container runs as the image default user', () => {
+    expect(buildExecArgs('c1', 'true', undefined)).toEqual(['exec', '-i', 'c1', 'sh', '-c', 'true']);
+  });
+
+  it('installs the token atomically with owner-only permissions', () => {
+    expect(GH_TOKEN_WRITE_CMD).toContain('mv -f /tmp/.gh-token.new /tmp/.gh-token');
+    expect(GH_TOKEN_WRITE_CMD).toContain('chmod 600');
   });
 });
