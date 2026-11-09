@@ -127,7 +127,6 @@ Once a thread has an outcome, or a clear moment where the momentum rose or fell,
    - **Your pick:** the one message you'd send, ready to copy.
    - **1–2 alternatives** in a different tone (more playful, or more direct).
    - **What changed and why**, with each small edit spelled out (e.g. "dropped 'maybe' → reads more confident", "added a specific day → easier to say yes to"). Cite their own history where you can ("same move as with Sarah on 2 Nov — she said yes").
-   - **When to send it**, based on the thread's timing (her usual reply speed, when she's most active, how long since her last message) and what has worked across threads. Be specific: "she usually replies around 9pm, send it then", "she took 6 h last time, so a 20 min reply is fine, there's no need to wait it out", "don't double-text yet, it's only been 3 h and her median is 5 h".
 4. Keep their voice. If they write in lowercase with no full stops, so do you. Don't make them sound scripted.
 5. While there are only a few threads (under about 5 with outcomes), say that the advice is mostly general for now and will get sharper as they add more.
 
