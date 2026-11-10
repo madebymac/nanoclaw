@@ -91,6 +91,34 @@ Context the user has told you that isn't in the screenshots (how they matched, w
 
 Keep `## Conversation` a faithful record; your opinions go only in `## Analysis`. Refresh the analysis when the thread grows or the outcome changes.
 
+## Profile photos
+
+To log incoming likes accurately, maintain a labelled index of the user's own profile photos in `dating/my-photos.md`. Each photo gets a short, memorable label (e.g. "guitar", "outdoor smiling", "formal close-up") so when a screenshot says "Liked your photo", you can record which one.
+
+### my-photos.md format
+
+```markdown
+# My Photos
+
+| label | description | platform | active |
+|-------|-------------|----------|--------|
+| guitar | sitting with acoustic guitar, indoor warm light | hinge | yes |
+| outdoor smiling | smiling outdoors, stone door/wall, burgundy jacket | hinge | yes |
+| formal close-up | close-up looking down, white shirt, formal event | hinge | yes |
+```
+
+### When an incoming like arrives
+
+1. **If the liked photo is visible in the screenshot** — identify it against `my-photos.md` and record the label.
+2. **If the photo is cropped or unclear** — ask the user which photo it was (one quick question), then update `my-photos.md` if the label is missing and record it on the thread.
+3. **Record the label** in the thread file: `liked Matthew's [label] photo (e.g. guitar photo)`.
+
+### Keeping it up to date
+
+- When the user mentions adding, removing, or reordering a profile photo, update `my-photos.md`.
+- If a photo is retired (removed from the profile), mark `active: no` rather than deleting it, so old threads still make sense.
+- Create `my-photos.md` on first use if it doesn't exist; ask the user to describe their current profile photos so you can populate it.
+
 ## Openers and matches
 
 Track every opener the user sends on an app: the first message, or the comment sent with a like (e.g. on a Hinge prompt or photo), and whether it led to a match. This shows which openers work.
