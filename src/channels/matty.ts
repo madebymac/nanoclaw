@@ -93,7 +93,8 @@ export function createMattyAdapter(sock: string = mattySocketPath()): ChannelAda
         fs.unlinkSync(sock);
       } catch (err) {
         const e = err as NodeJS.ErrnoException;
-        if (e.code !== 'ENOENT') log.warn('Failed to unlink stale Matty socket (will try to bind anyway)', { sock, err });
+        if (e.code !== 'ENOENT')
+          log.warn('Failed to unlink stale Matty socket (will try to bind anyway)', { sock, err });
       }
 
       server = net.createServer((socket) => handleConnection(socket, config));

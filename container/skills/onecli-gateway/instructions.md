@@ -13,4 +13,9 @@ If a GitHub App identity is bound to you, your GitHub access is a short-lived in
 - API: `curl -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" https://api.github.com/...`
 - git push: `git push https://x-access-token:$GH_TOKEN@github.com/<owner>/<repo>.git`
 
-Never tell the user GitHub "isn't connected" or hand them an OneCLI `connect_url` for GitHub — that flow does not apply. If a call returns `401`, the token is mid-refresh (it rotates ~hourly); wait and retry. Never print, echo, or commit the token.
+Never tell the user GitHub "isn't connected" or hand them an OneCLI `connect_url` for GitHub — that flow does not apply. If a call returns `401`, check `[ -n "$GH_TOKEN" ]` first:
+
+- **Token present, 401** — it may be mid-refresh (it rotates ~hourly). Retry once after a minute.
+- **Token empty** — the host failed to deliver it (mint or refresh failed host-side). Retrying, restarting, or OneCLI won't fix it. Tell the user once, plainly: "My GitHub App token wasn't delivered — check the host log for `GitHub App token`." Then continue with whatever doesn't need GitHub.
+
+Never print, echo, or commit the token.
